@@ -1,4 +1,46 @@
-# Orca-Flashforge
+# Mac Flash Studio
+
+Build nativo para **Apple Silicon (arm64)** do Flash Studio / Orca-Flashforge, com as novidades do **OrcaSlicer 2.4.2** e várias correções de desempenho para o macOS. Roda como um app separado (nome, ícone vermelho com selo "MAC", bundle id e pasta de dados próprios), então convive com o Flash Studio original.
+
+> Projeto não oficial, sem vínculo com a FlashForge. / Unofficial fork, not affiliated with FlashForge.
+> *English summary: native arm64 build of Flash Studio with OrcaSlicer 2.4.2 merged, a Rosetta bridge for FlashForge's x86_64-only network plugin, and macOS performance fixes. Download it from the Releases page.*
+
+## Instalação
+
+Requisitos: Mac com Apple Silicon (M1 ou mais novo) e macOS 11.3+.
+
+1. Baixe `Mac-Flash-Studio-<versão>-arm64.zip` na página de [Releases](../../releases), descompacte e arraste **Mac Flash Studio.app** para `/Applications`.
+2. O app é assinado só "ad hoc" (não notarizado). Na primeira abertura, clique com o botão direito → **Abrir**, ou rode:
+   ```bash
+   xattr -cr "/Applications/Mac Flash Studio.app"
+   ```
+3. **Plugin de rede (opcional, impressoras FlashForge):** o plugin da FlashForge é proprietário e só existe para x86_64, por isso **não vem no download**. Com o **Flash Studio original instalado** em `/Applications` e o Rosetta (`softwareupdate --install-rosetta`), rode:
+   ```bash
+   ./install-flashforge-plugin.sh
+   ```
+   (o script também está em `tools/mac/`). Ele copia o plugin do seu Flash Studio e reassina o app. Sem o plugin o fatiador funciona normalmente, só ficam indisponíveis login/nuvem, impressoras em rede, câmera, etc.
+
+Os dados ficam em `~/Library/Application Support/Mac-Flash-Studio` (o app original continua usando `Orca-Flashforge`).
+
+## O que mudou em relação ao Flash Studio 1.7.15
+
+- **Nativo arm64** e **ponte para o plugin de rede x86_64** (`tools/fnet-bridge`): um *shim* arm64 com a mesma API C repassa as chamadas por um socket para um helper x86_64 (Rosetta) que carrega o plugin original; callbacks, structs e liberação de memória são tratados.
+- **Merge do OrcaSlicer 2.4.2** no fork.
+- **Interface sem travar em projetos grandes:** o backup automático exportava o projeto inteiro na thread da interface a cada 10 s. Agora usa compressão rápida, sem cursor de espera, e o intervalo padrão é 300 s (migrado uma vez; ajustável em Preferências → Geral).
+- **Vista 3D mais fluida:** modelos muito densos (> 120 mil triângulos) são desenhados com uma versão simplificada enquanto a câmera se move (girar/pan/zoom) e voltam ao detalhe total ao parar. Num projeto com ~40 milhões de triângulos: ~15 → ~50 FPS ao girar.
+- **Muito menos memória** com vários objetos pintados idênticos: o modelo pintado e a árvore de busca do mouse são compartilhados e a geometria completa não é duplicada. Num projeto com 16 figuras de 2 M de triângulos: ~7,1 → ~2,3 GB (pico 12 → 3,5 GB) e carga de ~22 → ~12 s.
+- Fatiamento mais rápido: `mimalloc` como alocador e menos custo no fechamento de pontes (`merge_bridges`).
+- Preferências → Gráficos: opção de **Retina** (OpenGL em alta resolução).
+- Bloqueio do "modo furtivo" e aviso automático de atualização removidos.
+
+## Observações
+
+- Em pastas protegidas (Documentos, Mesa, Downloads) o macOS pede permissão na primeira vez para o novo app; ao reassinar o app ele pode pedir de novo.
+- O modo "realista" com sombras no prato recria a geometria completa dos objetos pintados (usa mais memória).
+
+---
+
+# Orca-Flashforge (original README)
 Orca-Flashforge is an open source slicer for FDM printers.
 
 # How to compile
