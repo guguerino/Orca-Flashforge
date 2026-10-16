@@ -121,7 +121,7 @@ if(ORCA_TOOLS)
 endif()
 
 # Create a slic3r executable
-set(MACOSX_BUNDLE_BUNDLE_NAME "Flash Studio" CACHE STRING "MacOS Bundle Name" FORCE)
+set(MACOSX_BUNDLE_BUNDLE_NAME "Mac Flash Studio" CACHE STRING "MacOS Bundle Name" FORCE)
 set(MACOSX_BUNDLE_COPYRIGHT "Copyright(C) 2022-2023 FlashForge All Rights Reserved")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/Orca-Flashforge.rc.in ${CMAKE_CURRENT_BINARY_DIR}/Orca-Flashforge.rc @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/msw/Orca-Flashforge.manifest.in ${CMAKE_CURRENT_BINARY_DIR}/Orca-Flashforge.manifest @ONLY)
@@ -136,9 +136,9 @@ else ()
     )
     set_target_properties(Orca-Flashforge PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_BUNDLE_NAME "Flash Studio"
-        OUTPUT_NAME "Flash Studio" 
-        BUNDLE_OUTPUT_NAME "Flash Studio" 
+        MACOSX_BUNDLE_BUNDLE_NAME "Mac Flash Studio"
+        OUTPUT_NAME "Mac Flash Studio" 
+        BUNDLE_OUTPUT_NAME "Mac Flash Studio" 
     )
 endif ()
 
@@ -272,9 +272,9 @@ else ()
         set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/../resources")
     endif ()
     if (CMAKE_MACOSX_BUNDLE)
-        set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flash Studio.app/Contents/Resources")
+        set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Mac Flash Studio.app/Contents/Resources")
         set(MACOSX_BUNDLE_ICON_FILE Icon.icns)
-        set(MACOSX_BUNDLE_BUNDLE_NAME "Flash Studio")
+        set(MACOSX_BUNDLE_BUNDLE_NAME "Mac Flash Studio")
         set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${Orca_Flashforge_VERSION})
         set(MACOSX_BUNDLE_COPYRIGHT "Copyright(C) 2022-2023 FlashForge All Rights Reserved")
     endif()

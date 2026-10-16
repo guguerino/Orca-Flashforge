@@ -103,12 +103,12 @@ if [ -z "$CMAKE_IGNORE_PREFIX_PATH" ]; then
 fi
 
 # CMake 实际产物的 bundle 名（如修改 src/CMakeLists.txt 中的 OUTPUT_NAME 需同步更新）
-SRC_APP_BUNDLE="Flash Studio.app"
+SRC_APP_BUNDLE="Mac Flash Studio.app"
 SRC_VALIDATOR_BUNDLE="OrcaSlicer_profile_validator.app"
 SRC_VALIDATOR_BIN="OrcaSlicer_profile_validator"
 
 # 打包目录里对外的交付名（保留 Orca-Flashforge 不动）
-OUT_APP_BUNDLE="Orca-Flashforge.app"
+OUT_APP_BUNDLE="Mac Flash Studio.app"
 OUT_VALIDATOR_BUNDLE="Orca-Flashforge_profile_validator.app"
 
 CMAKE_VERSION=$(cmake --version | head -1 | sed 's/[^0-9]*\([0-9]*\).*/\1/')

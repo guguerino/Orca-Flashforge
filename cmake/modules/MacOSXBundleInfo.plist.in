@@ -11,12 +11,14 @@
 	<key>CFBundleIconFile</key>
 	<string>${MACOSX_BUNDLE_ICON_FILE}</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.flashforge.orca-flashforge</string>
+	<string>com.guguerino.mac-flash-studio</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleLongVersionString</key>
 	<string>${MACOSX_BUNDLE_LONG_VERSION_STRING}</string>
 	<key>CFBundleName</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+	<key>CFBundleDisplayName</key>
 	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
@@ -28,33 +30,6 @@
 	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
 	<key>ATSApplicationFontsPath</key>
   	<string>fonts/</string>
-  <key>CFBundleURLTypes</key>
-    <array>
-      <dict>
-        <key>CFBundleURLName</key>
-        <string>Orca-Flashforge Downloads</string>
-        <key>CFBundleURLSchemes</key>
-        <array>
-          <string>orcaflashforge</string>
-        </array>
-      </dict>
-		<dict>
-        <key>CFBundleURLName</key>
-        <string>BambuStudio Downloads</string>
-        <key>CFBundleURLSchemes</key>
-        <array>
-          <string>bambustudioopen</string>
-        </array>
-      </dict>
-	  <dict>
-        <key>CFBundleURLName</key>
-        <string>Orca-Flashforge Downloads</string>
-        <key>CFBundleURLSchemes</key>
-        <array>
-          <string>orcaflashforgeopen</string>
-        </array>
-      </dict>
-    </array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

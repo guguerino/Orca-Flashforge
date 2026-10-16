@@ -14,7 +14,7 @@ set(Orca_Flashforge_VERSION_MAJOR ${CMAKE_MATCH_1})
 set(Orca_Flashforge_VERSION_MINOR ${CMAKE_MATCH_2})
 set(Orca_Flashforge_VERSION_PATCH ${CMAKE_MATCH_3})
 
-set(SLIC3R_VERSION "01.10.01.50")
+set(SLIC3R_VERSION "02.06.00.51")
 set(SoftFever_VERSION "2.4.2")
 if (NOT DEFINED ORCA_UPDATER_SIG_KEY)
     set(ORCA_UPDATER_SIG_KEY "" CACHE STRING "Base64url encoded updater signature key")

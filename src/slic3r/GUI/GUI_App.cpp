@@ -2600,7 +2600,7 @@ void GUI_App::init_app_config()
     // cloud service keeps recognizing the client.
     {
         const std::string ver = Orca_Flashforge_VERSION;
-        wxString app_key = SLIC3R_APP_KEY;
+        wxString app_key = SLIC3R_USER_DIR_NAME;
         if (ver.find("alpha") != std::string::npos)
             app_key += "-alpha";
         else if (ver.find("beta") != std::string::npos)
@@ -5645,38 +5645,8 @@ std::string GUI_App::handle_web_request(std::string cmd, const std::vector<std::
                     return "";
                 }
             }
-            static const std::unordered_set<std::string> stealth_blocked_info_commands = {
-                "get_login_info",
-            };
-            static const std::unordered_set<std::string> stealth_blocked_login_commands = {
-                "homepage_login_or_register",
-            };
-            if (app_config->get_stealth_mode() && stealth_blocked_info_commands.count(command_str)) {
-                CallAfter([this] {
-                    if (mainframe && mainframe->m_webview)
-                        mainframe->m_webview->SendCloudProvidersInfo();
-                });
-                return "";
-            }
-            if (app_config->get_stealth_mode() && stealth_blocked_login_commands.count(command_str)) {
-                CallAfter([this, command_str] {
-                    MessageDialog dlg(mainframe,
-                        _L("You are currently in Stealth Mode. To log into the Cloud, you need to disable Stealth Mode first."),
-                        _L("Stealth Mode"),
-                        wxOK | wxCANCEL | wxCENTRE);
-                    dlg.SetButtonLabel(wxID_OK, _L("Quit Stealth Mode"));
-                    if (dlg.ShowModal() == wxID_OK) {
-                        app_config->set_bool("stealth_mode", false);
-                        app_config->save();
-                        if (mainframe && mainframe->m_webview)
-                            mainframe->m_webview->SendCloudProvidersInfo();
-                        // Continue with login
-                        if (command_str == "homepage_login_or_register")
-                            this->request_login(true);
-                    }
-                });
-                return "";
-            }
+            // Flash Studio: stealth mode only stops automatic cloud traffic (auto login, preset sync);
+            // the homepage login stays available, so upstream's web-command blocking is not applied here.
             if (command_str.compare("request_project_download") == 0) {
                 if (root.get_child_optional("data") != boost::none) {
                     pt::ptree data_node = root.get_child("data");
