@@ -14,11 +14,8 @@ Requisitos: Mac com Apple Silicon (M1 ou mais novo) e macOS 11.3+.
    ```bash
    xattr -cr "/Applications/Mac Flash Studio.app"
    ```
-3. **Plugin de rede (opcional, impressoras FlashForge):** o plugin da FlashForge é proprietário e só existe para x86_64, por isso **não vem no download**. Com o **Flash Studio original instalado** em `/Applications` e o Rosetta (`softwareupdate --install-rosetta`), rode:
-   ```bash
-   ./install-flashforge-plugin.sh
-   ```
-   (o script também está em `tools/mac/`). Ele copia o plugin do seu Flash Studio e reassina o app. Sem o plugin o fatiador funciona normalmente, só ficam indisponíveis login/nuvem, impressoras em rede, câmera, etc.
+3. **Plugin de rede:** o download já inclui o plugin da FlashForge (`libFlashNetwork_x64.dylib`, copiado sem modificação do Flash Studio oficial). Ele só existe para x86_64, então precisa do Rosetta: `softwareupdate --install-rosetta`. O plugin é software proprietário da FlashForge, redistribuído aqui apenas para conveniência; os direitos são da FlashForge.
+   Se quiser trocar por outra versão do plugin (por exemplo a de um Flash Studio mais novo), use `./install-flashforge-plugin.sh` (também em `tools/mac/`), que copia o plugin do Flash Studio instalado em `/Applications` e reassina o app.
 
 Os dados ficam em `~/Library/Application Support/Mac-Flash-Studio` (o app original continua usando `Orca-Flashforge`).
 
