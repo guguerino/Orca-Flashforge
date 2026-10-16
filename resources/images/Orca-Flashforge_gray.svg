@@ -4,8 +4,8 @@
     <defs>
         <path d="M0,0 L256,0 L256,256 L0,256 L0,0 Z" id="path-1"></path>
         <linearGradient x1="50%" y1="0%" x2="50%" y2="69.4679054%" id="linearGradient-2">
-            <stop stop-color="#01F6FF" offset="0%"></stop>
-            <stop stop-color="#00ADE6" offset="100%"></stop>
+            <stop stop-color="#FF0016" offset="0%"></stop>
+            <stop stop-color="#E61D00" offset="100%"></stop>
         </linearGradient>
     </defs>
     <g id="Orca-Flashforge_gradient_circle" stroke="none" fill="none" xlink:href="#path-1" fill-rule="evenodd" stroke-width="1">

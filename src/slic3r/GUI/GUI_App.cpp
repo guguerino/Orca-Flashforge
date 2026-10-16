@@ -3365,6 +3365,12 @@ bool GUI_App::on_init_inner()
                 dialog.SetExtendedMessage(extmsg);*/
                 const bool force_update = version_info.force_upgrade;
                 const bool auto_check = evt.GetInt() == 0;
+                // Mac Flash Studio is a separate build next to the original app: the automatic check must not
+                // offer the original installer. A manual "Check for updates" still shows the dialog.
+                if (auto_check) {
+                    BOOST_LOG_TRIVIAL(info) << "automatic update prompt suppressed, server version = " << version_info.version_str;
+                    return;
+                }
                 std::string skip_version_str = this->app_config->get("app", "skip_version");
                 bool skip_this_version = false;
                 bool skipped_version_matched = false;
