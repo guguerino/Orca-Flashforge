@@ -1,9 +1,4 @@
 {
-    "type": "filament",
-    "filament_id": "GFB99",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
-    "from": "system",
     "activate_air_filtration": [
         "0"
     ],
@@ -19,11 +14,12 @@
     "close_fan_the_first_x_layers": [
         "1"
     ],
-  "compatible_printers": [
-    "Flashforge Guider 3 Ultra 0.4 Nozzle"
-  ],
+    "compatible_printers": [
+        "Flashforge Guider 3 Ultra 0.4 Nozzle"
+    ],
     "compatible_printers_condition": "",
-    "compatible_prints": [],
+    "compatible_prints": [
+    ],
     "compatible_prints_condition": "",
     "complete_print_exhaust_fan_speed": [
         "80"
@@ -88,6 +84,7 @@
     "filament_flow_ratio": [
         "1"
     ],
+    "filament_id": "GFB99",
     "filament_is_support": [
         "1"
     ],
@@ -176,7 +173,7 @@
         "35"
     ],
     "filament_vendor": [
-        "Generic"
+        "Polymaker"
     ],
     "filament_wipe": [
         "nil"
@@ -190,6 +187,7 @@
     "filament_z_hop_types": [
         "nil"
     ],
+    "from": "system",
     "full_fan_speed_layer": [
         "0"
     ],
@@ -200,6 +198,7 @@
         "55"
     ],
     "inherits": "Flashforge Generic PLA",
+    "instantiation": "true",
     "name": "Polymaker Generic S1",
     "nozzle_temperature": [
         "220"
@@ -228,6 +227,7 @@
     "required_nozzle_HRC": [
         "0"
     ],
+    "setting_id": "NXQtHvtO4tyQ1ueu",
     "slow_down_for_layer_cooling": [
         "1"
     ],
@@ -249,5 +249,6 @@
     "textured_plate_temp_initial_layer": [
         "55"
     ],
+    "type": "filament",
     "version": "1.9.0.2"
 }

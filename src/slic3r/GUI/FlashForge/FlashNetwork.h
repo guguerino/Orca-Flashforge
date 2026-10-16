@@ -11,9 +11,9 @@
 #define FNET_API
 #endif
 
-
 #define MAX_DEVICE_SN_LEN 128
 #define MAX_DEVICE_NAME_LEN 128
+#define DAT_FILE_NAME "FLASHNETWORK9.DAT"
 
 typedef enum fnet_log_level {
     FNET_LOG_LEVEL_OFF,
@@ -63,6 +63,7 @@ typedef enum fnet_conn_write_data_type {
 
 typedef enum fnet_conn_read_data_type {
     FNET_CONN_READ_SYS_NOTIFY,          // data, char *payload
+    FNET_CONN_READ_UPDATE_NOTIFY,       // data, chat *payload
     FNET_CONN_READ_SYNC_USER_PROFILE,   // data, nullptr
     FNET_CONN_READ_SYNC_UNREGISTER_USER,// data, nullptr
     FNET_CONN_READ_SYNC_LOGIN,          // data, fnet_sync_login_info_t
@@ -72,6 +73,10 @@ typedef enum fnet_conn_read_data_type {
     FNET_CONN_READ_SYNC_OFFLINE,        // data, fnet_sync_online_info_t
     FNET_CONN_READ_DEVICE_DETAIL,       // data, fnet_dev_detail_t
     FNET_CONN_READ_DEVICE_KEEP_ALIVE,   // data, char *devId
+    FNET_CONN_READ_SLICE_STATE,         // data, fnet_slice_state_t
+    FNET_CONN_READ_JOB_DOWNLOAD,        // data, fnet_job_info_t
+    FNET_CONN_READ_JOB_UNZIP,           // data, fnet_job_info_t
+    FNET_CONN_READ_UPLOAD_LOG,          // data, fnet_upload_log_info_t
 } fnet_conn_read_data_type_t;
 
 struct fnet_conn_read_data;
@@ -79,6 +84,15 @@ typedef struct fnet_conn_read_data fnet_conn_read_data_t;
 
 // returning a non-zero value from the callback aborts the transfer
 typedef int (*fnet_progress_callback_t)(long long now, long long total, void *data);
+// settingJson is valid only for the duration of the callback and contains one
+// complete preset object using the OrcaSlicer setting_id/name/type keys.
+typedef int (*fnet_setting_check_callback_t)(const char *settingJson, void *data);
+
+typedef void (*fnet_setting_progress_callback_t)(int progress, void *data);
+
+// Return non-zero to cancel a setting-list transfer.
+typedef int (*fnet_setting_cancel_callback_t)(void *data);
+
 
 typedef void (*fnet_conn_status_callback_t)(fnet_conn_status_t status, void *data);
 
@@ -140,6 +154,8 @@ typedef struct fnet_clound_job_data {
     const char *gcodeStorageUrl;
     const char *thumbStorageKey;
     const char *thumbStorageUrl;
+    const char *unionId;
+    int plateNo;
     int printNow;                       // 1 true, 0 false
     int levelingBeforePrint;            // 1 true, 0 false
     int flowCalibration;                // 1 true, 0 false
@@ -170,6 +186,11 @@ typedef struct fnet_upload_file_data {
     fnet_progress_callback_t callback;
     void *callbackData;
 } fnet_upload_file_data_t;
+
+typedef struct fnet_upload_log_info {
+    char *feedbackId;
+    char *clientType;
+} fnet_upload_log_info_t;
 
 typedef struct fnet_start_ai_model_job_data {
     int supplier;
@@ -210,7 +231,7 @@ typedef struct fnet_tracking_event_data {
     const char *expIds;
     const char *objectType;
     const char *objectId;
-    const char *searchKeyword;
+    const char *extend;
     const char *timestamp;
 } fnet_tracking_event_data_t;
 
@@ -486,7 +507,29 @@ typedef struct fnet_dev_detail {
     char *polarRegisterCode;
     char *flashRegisterCode;
     char *errorCode;
+    double cumulativePrintTimeSecond; // second
+    int hasCumulativePrintTimeSecond; // 1 if reported, 0 if unavailable
 } fnet_dev_detail_t;
+
+typedef struct fnet_slice_state {
+    char* id;
+    char* deviceId;
+    char* status;
+    int waitingCount;
+    int percentage;
+    int timestamp;
+    char* fileName;
+    char* thumbImagePath;
+    double weight;
+} fnet_slice_state_t;
+
+typedef struct fnet_job_info {
+    char* jobId;
+    char* deviceId;
+    char* status;
+    int percentage;
+    char* errorCode;
+} fnet_job_info_t;
 
 typedef struct fnet_gcode_tool_data {
     int toolId;
@@ -607,6 +650,18 @@ typedef struct fnet_ai_general_job_state {
     const char *externalJobId;
 } fnet_ai_general_job_state_t;
 
+typedef struct fnet_sys_msg_data {
+    int id;
+    int messageId;
+    const char* notifyType;
+    const char* title;
+    const char* content;
+    int linkType;
+    const char* linkUrl;
+    int duration;
+    int showCount;
+} fnet_sys_msg_data_t;
+
 typedef struct fnet_mqtt_config {
     char *userTopic;
     char **commonTopics;
@@ -657,16 +712,32 @@ typedef struct fnet_conn_read_data {
 #define FNET_INPUT_FAILED_THE_REVIEW 2007
 #define FNET_PRINT_LIST_MODEL_COUNT_EXCEEDED 2008
 #define FNET_CONN_SEND_ERROR 3001
+#define FNET_TIMEOUT 3002
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+#define FNET_INVALID_PARAMETER 4001
+#define FNET_GET_SETTING_LIST_FAILED 4002
+#define FNET_PUT_SETTING_FAILED 4003
+#define FNET_DELETE_SETTING_FAILED 4004
+
+// FlashForge preset service business codes. The HTTP status is returned separately.
+#define FNET_PRESET_UNSUPPORTED_TYPE 120000
+#define FNET_PRESET_SETTING_ALREADY_EXISTS 120001
+#define FNET_PRESET_NAME_ALREADY_EXISTS 120002
+#define FNET_PRESET_NOT_FOUND 120003
+#define FNET_PRESET_HAS_ACTIVE_CHILDREN 120004
+#define FNET_PRESET_CREATE_CONFLICT 120005
+#define FNET_PRESET_UPDATE_CONFLICT 120006
 
 FNET_API int fnet_initlize(const char *serverSettingsPath, const fnet_log_settings_t *logSettings);
 
 FNET_API void fnet_uninitlize();
 
 FNET_API const char *fnet_getVersion(); // 3.0.0
+
+FNET_API const char* fnet_getHomePageUrl();
 
 FNET_API void fnet_setUserAgent(const char *userAgent);
 
@@ -830,6 +901,12 @@ FNET_API void fnet_freeBindAccountRelpResult(fnet_bind_account_relp_result_t *bi
 FNET_API int fnet_uploadAiImageClound(const char *clientId, const char *accessToken, const char *uid,
     const fnet_upload_file_data_t *uploadFileData, fnet_clound_file_data_t **cloundFileData, int msTimeout);
 
+FNET_API int fnet_uploadLogFileCloud(const char* clientId, const char* accessToken, const fnet_upload_file_data_t* uploadFileData, const char* connectEmail, int msTimeout);
+
+FNET_API int fnet_uploadLogFileCloudEx(const char *clientId, const char *accessToken,
+    const fnet_upload_file_data_t *uploadFileData, const char *connectEmail,
+    const char *feedbackId, int msTimeout);
+
 FNET_API void fnet_freeCloundFileData(fnet_clound_file_data_t *cloundFileData);
 
 FNET_API int fnet_getUserAiPointsInfo(const char *clientId, const char *accessToken,
@@ -893,6 +970,8 @@ FNET_API int fnet_addPrintListModel(const char *clientId, const char *accessToke
 FNET_API int fnet_removePrintListModel(const char *clientId, const char *accessToken, const char *modelId,
     int msTimeout);
 
+FNET_API int fnet_navLikeModel(const char* clientId, const char* accessToken, const char* modelId, int like, int msTimeout);
+
 FNET_API int fnet_reportModel(const char *clientId, const char *accessToken,
     const fnet_report_model_data_t *reportData, int msTimeout);
 
@@ -902,11 +981,64 @@ FNET_API int fnet_reportTrackingData(const char *clientId, const fnet_tracking_c
 FNET_API int fnet_reportTrackingDataBatch(const char *clientId, const fnet_tracking_common_data_t *commonData,
     const fnet_tracking_event_data_t *eventDatas, int eventCnt, int msTimeout);
 
+FNET_API int fnet_getSystemMessage(const char* clientId, const char* accessToken, const char* language, 
+    fnet_sys_msg_data_t **responseData, int msTimeout);
+
+FNET_API int fnet_postReadSystemMessage(const char* clientId, const char* accessToken, int id, int msTimeout);
+
+FNET_API void fnet_freeSystemMessage(fnet_sys_msg_data_t* data);
+
+FNET_API int fnet_getMonitorMessage(const char* clientId, const char* accessToken, const char* language,
+    fnet_sys_msg_data_t** responseData, int msTimeout);
+
+FNET_API int fnet_retrySliceTask(const char* clientId, const char* accessToken, const char* taskId, int msTimeout);
+
+FNET_API int fnet_cancelSliceTask(const char* clientId, const char* accessToken, const char* taskId, int msTimeout);
+
+FNET_API void fnet_freeSliceState(const fnet_slice_state_t* detail);
+
+FNET_API void fnet_freeJobInfo(const fnet_job_info_t* detail);
+
 FNET_API int fnet_doBusGetRequest(const char *clientId, const char *accessToken, const char *language,
     const char *target, char **responseData, int msTimeout); // call fnet_freeString to release message
 
 FNET_API int fnet_doBusPostRequest(const char *clientId, const char *accessToken, const char *language,
     const char *target, const char *postFields, int *code, int msTimeout);
+// Downloads the complete cloud preset JSON file and replaces the in-memory
+// cache. bundleVersion is reserved for compatibility with OrcaSlicer's
+// network-plugin ABI.
+FNET_API int fnet_getSettingList2(const char *clientId, const char *accessToken,
+    const char *bundleVersion, fnet_setting_check_callback_t checkCallback, void *checkCallbackData,
+    fnet_setting_progress_callback_t progressCallback, void *progressCallbackData,
+    fnet_setting_cancel_callback_t cancelCallback, void *cancelCallbackData, int msTimeout);
+
+FNET_API int fnet_getSettingList(const char *clientId, const char *accessToken,
+    const char *bundleVersion, fnet_setting_progress_callback_t progressCallback,
+    void *progressCallbackData, fnet_setting_cancel_callback_t cancelCallback,
+    void *cancelCallbackData, int msTimeout);
+
+// Returns the cache populated by fnet_getSettingList/fnet_getSettingList2 as a
+// JSON object keyed by setting_id. Release with fnet_freeString.
+FNET_API int fnet_getUserPresets(const char *clientId, const char *accessToken,
+    char **userPresetsJson);
+
+// valuesJson must be a JSON object whose values follow OrcaSlicer's string-map
+// convention. Create values must contain setting_id and type. Update values must
+// contain type and updated_time; updated_time is sent to the server as ISO-8601 UTC.
+// Writes are sent to the user-preset add/update endpoints.
+// Server updateTime/updatedTime values are returned as Unix epoch millisecond strings.
+// Release resultValuesJson with fnet_freeString.
+FNET_API int fnet_requestSettingId(const char *clientId, const char *accessToken,
+    const char *name, const char *valuesJson, char **settingId, char **resultValuesJson,
+    unsigned int *httpCode, int msTimeout);
+
+FNET_API int fnet_putSetting(const char *clientId, const char *accessToken,
+    const char *settingId, const char *name, const char *valuesJson,
+    char **resultValuesJson, unsigned int *httpCode, int msTimeout);
+
+FNET_API int fnet_deleteSetting(const char *clientId, const char *accessToken,
+    const char *settingId, unsigned int *httpCode, int msTimeout);
+
 
 FNET_API int fnet_getMqttConfig(const char *clientId, const char *accessToken, fnet_mqtt_config_t **mqttConfig,
     int msTimeout);
@@ -935,6 +1067,8 @@ FNET_API void fnet_freeSyncLoginInfo(const fnet_sync_login_info_t *loginInfo);
 FNET_API void fnet_freeSyncBindInfo(const fnet_sync_bind_info_t *bindInfo);
 
 FNET_API void fnet_freeSyncOnlineInfo(const fnet_sync_online_info_t *onlineInfo);
+
+FNET_API void fnet_freeUploadLogInfo(const fnet_upload_log_info_t *uploadLogInfo);
 
 FNET_API char *fnet_allocString(const char *str, int len);
 

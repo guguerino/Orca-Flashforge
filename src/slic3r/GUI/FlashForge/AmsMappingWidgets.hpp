@@ -82,6 +82,8 @@ private:
 
     void setupNozzles();
 
+    bool isLikeFilament();
+
     void onLeftDown(wxMouseEvent &evt);
 
     void onMotion(wxMouseEvent &evt);
@@ -129,6 +131,8 @@ public:
     void resetSlot();
 
     com_material_mapping_t getMaterialMapping();
+
+    bool matchMaterialStr(const wxString& str);
 
 private:
     void onPaint(wxPaintEvent &evt);

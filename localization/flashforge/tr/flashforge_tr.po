@@ -1,0 +1,1169 @@
+msgid "Based on BambuStudio and PrusaSlicer"
+msgstr "BambuStudio ve PrusaSlicer temel alınarak geliştirilmiştir."
+
+msgid "The Flash Studio needs an upgrade"
+msgstr ""
+
+msgid "Unable to connect to the Internet!"
+msgstr "İnternete bağlanılamadı!"
+
+msgid ""
+"Flash Studio is based on OrcaSlicer by Softfever, and OrcaSlicer is based on "
+"BambuStudio by Bambulab, which is from PrusaSlicer by Prusa Research.  "
+"PrusaSlicer is from Slic3r by Alessandro Ranellucci and the RepRap community"
+msgstr ""
+
+msgid "Flash Studio is based on OrcaSlicer by SoftFever."
+msgstr ""
+
+msgid ""
+"Another virtual camera is running.\n"
+"Flash Studio supports only a single virtual camera.\n"
+"Do you want to stop this virtual camera?"
+msgstr ""
+
+msgid ""
+"The .gcode.3mf file contains no G-code data.Please slice it with "
+"Flash Studio and export a new .gcode.3mf file."
+msgstr ""
+
+msgctxt "Flashforge"
+msgid "Device Status"
+msgstr "Cihaz Durumu"
+
+msgid "If enabled, sets Flash Studio as default application to open .3mf files"
+msgstr ""
+
+msgid "If enabled, sets Flash Studio as default application to open .stl files"
+msgstr ""
+
+msgid ""
+"If enabled, sets Flash Studio as default application to open .step files"
+msgstr ""
+
+msgid "Please login first."
+msgstr "Lütfen önce giriş yapın."
+
+msgid "Are you sure to unbind this device?"
+msgstr "Bu cihazın bağlantısını kaldırmak istediğinizden emin misiniz?"
+
+msgid "Question"
+msgstr "Soru"
+
+msgid "No printer connected, please connect printer first!"
+msgstr "Yazıcı bağlı değil. Lütfen önce yazıcıyı bağlayın!"
+
+msgid ""
+"Step 1, please confirm Flash Studio and your printer are in the same LAN."
+msgstr ""
+
+msgid "Get Code"
+msgstr "Kod Al"
+
+msgid "Phone Login/ Register"
+msgstr "Telefonla Giriş / Kayıt"
+
+msgid "Password Login"
+msgstr "Şifreyle Giriş"
+
+msgid "Please enter your account"
+msgstr "Lütfen hesabınızı girin"
+
+msgid "Mobile phone number error"
+msgstr "Cep telefonu numarası hatalı"
+
+msgid "Phone Number / email"
+msgstr "Telefon numarası / e-posta"
+
+msgid "Verify code is incorrect"
+msgstr "Doğrulama kodu hatalı"
+
+msgid "Read and Agree to Accept"
+msgstr "Okudum ve kabul ediyorum"
+
+msgid "《Term "
+msgstr ""
+
+msgid "of "
+msgstr ""
+
+msgid "Service》"
+msgstr "》"
+
+msgid "《Term of Service》"
+msgstr "《Hizmet Şartları》"
+
+msgid "《Privacy Policy》"
+msgstr "《Gizlilik Politikası》"
+
+msgid "Register"
+msgstr "Kayıt Ol"
+
+msgid "Forget Password"
+msgstr "Şifremi Unuttum"
+
+msgid "Account/verification code empty. Please enter."
+msgstr "Hesap/doğrulama kodu boş. Lütfen girin."
+
+msgid "Please check the agreement first."
+msgstr "Lütfen önce sözleşmeyi onaylayın."
+
+msgid "User not registered"
+msgstr "Kullanıcı kayıtlı değil"
+
+msgid "Account/password empty. Please enter."
+msgstr "Hesap/şifre boş. Lütfen girin."
+
+msgid "Email Address Error"
+msgstr "E-posta adresi hatalı"
+
+msgid "Password is incorrect"
+msgstr "Şifre hatalı"
+
+msgid "Code"
+msgstr "Kod"
+
+msgid "Phone Number"
+msgstr "Telefon Numarası"
+
+msgid "Email"
+msgstr "E-posta"
+
+msgid "Machine Type"
+msgstr "Makine Tipi"
+
+msgid "LAN"
+msgstr "LAN"
+
+msgid "Login out"
+msgstr "Çıkış yap"
+
+msgid "cancel"
+msgstr "iptal"
+
+msgid "confirm"
+msgstr "onayla"
+
+msgid ""
+"The current device has \n"
+"no printing projects"
+msgstr ""
+"Mevcut cihazda\n"
+"yazdırma projesi yok"
+
+msgid "Material Station"
+msgstr "Malzeme İstasyonu"
+
+msgid "Start Filtering"
+msgstr "Filtrelemeyi Başlat"
+
+msgid "Internal Circulate"
+msgstr "İç Sirkülasyon"
+
+msgid "External Circulate"
+msgstr "Dış Sirkülasyon"
+
+msgid "file name:"
+msgstr "dosya adı:"
+
+msgid "Device offline"
+msgstr "Cihaz çevrimdışı"
+
+msgid "clear"
+msgstr "temizle"
+
+msgid "Info and Control"
+msgstr "Bilgi ve Kontrol"
+
+msgid "file: "
+msgstr ""
+
+msgid "h "
+msgstr ""
+
+msgid "min "
+msgstr ""
+
+msgid "Remaining Time"
+msgstr "Kalan Süre"
+
+msgid "pause print"
+msgstr "yazdırmayı duraklat"
+
+msgid "cancel print"
+msgstr "yazdırmayı iptal et"
+
+msgid "Whether Cancel Printing"
+msgstr "Yazdırma iptal edilsin mi?"
+
+msgid "yes"
+msgstr "evet"
+
+msgid "no"
+msgstr "hayır"
+
+msgid "Local File List"
+msgstr "Yerel Dosya Listesi"
+
+msgid "print"
+msgstr "yazdır"
+
+msgid "idle"
+msgstr "boşta"
+
+msgid "completed"
+msgstr "tamamlandı"
+
+msgid "Print completed,clean platform!"
+msgstr "Yazdırma tamamlandı, platformu temizleyin!"
+
+msgid "Total Time"
+msgstr "Toplam Süre"
+
+msgid "busy"
+msgstr "meşgul"
+
+msgid "Print cancelled,in cache command"
+msgstr "Yazdırma iptal edildi, önbellekte komut var"
+
+msgid "pause"
+msgstr "duraklat"
+
+msgid "continue print"
+msgstr "yazdırmaya devam et"
+
+msgid "pausing"
+msgstr "duraklatılıyor"
+
+msgid "heating"
+msgstr "ısıtılıyor"
+
+msgid "printing"
+msgstr "yazdırılıyor"
+
+msgid "The maximum temperature cannot exceed"
+msgstr "Maksimum sıcaklık şu değeri aşamaz:"
+
+msgid "Spray Nozzle"
+msgstr "Nozzle"
+
+msgid "Print Size"
+msgstr "Baskı Boyutu"
+
+msgid "Firmware Version"
+msgstr "Firmware Sürümü"
+
+msgid "Serial Number"
+msgstr "Seri Numarası"
+
+msgid "Private Material Statistics"
+msgstr "Özel Malzeme İstatistikleri"
+
+msgid "Paused"
+msgstr "Duraklatıldı"
+
+msgid "The printer move out of range.Please go home again!"
+msgstr ""
+"Yazıcı hareket aralığının dışına çıktı. Lütfen yeniden başlangıç konumuna alın!"
+
+msgid "Lost communication with MCU eboard"
+msgstr "MCU eboard ile iletişim kesildi"
+
+msgid "TMC reports error:GSTAT"
+msgstr "TMC hata bildiriyor: GSTAT"
+
+msgid "Unable to read tmc"
+msgstr "TMC okunamıyor"
+
+msgid "MCU eboard: Unable to connect"
+msgstr "MCU eboard: Bağlanılamıyor"
+
+msgid "Nozzle temperature error."
+msgstr "Nozzle sıcaklık hatası."
+
+msgid "Extruder not heating at expected.Please check extruder."
+msgstr "Ekstrüder beklenen şekilde ısınmıyor. Lütfen ekstrüderi kontrol edin."
+
+msgid "Platform not heating at expected.Please check platform."
+msgstr "Platform beklenen şekilde ısınmıyor. Lütfen platformu kontrol edin."
+
+msgid "Chamber not heating at expected.Please check chamber."
+msgstr "Hazne beklenen şekilde ısınmıyor. Lütfen hazneyi kontrol edin."
+
+msgid "Host error, please restart !"
+msgstr "Host hatası, lütfen yeniden başlatın!"
+
+msgid "Z-Axis go home error."
+msgstr "Z ekseni başlangıç konumuna alma hatası."
+
+msgid "Y-Axis go home error."
+msgstr "Y ekseni başlangıç konumuna alma hatası."
+
+msgid "X-Axis go home error."
+msgstr "X ekseni başlangıç konumuna alma hatası."
+
+msgid "Extruder temperature error !"
+msgstr "Ekstrüder sıcaklık hatası!"
+
+msgid "Platform temperature error !"
+msgstr "Platform sıcaklık hatası!"
+
+msgid "Move queue overflow"
+msgstr "Hareket kuyruğu doldu"
+
+msgid "No filament"
+msgstr "Filament yok"
+
+msgid "Select a slot, and click the \"Load\" or \n\"Unload\" button to load or unload \nfilament."
+msgstr ""
+"Bir yuva seçin ve filament yüklemek veya boşaltmak için\n"
+"“Yükle” ya da “Boşalt” düğmesine tıklayın."
+
+msgctxt "filament"
+msgid "Load"
+msgstr "Yükle"
+
+msgctxt "filament"
+msgid "Unload"
+msgstr "Boşalt"
+
+msgid "Heat up"
+msgstr "Isıt"
+
+msgid "Cut off filament"
+msgstr "Filamenti kes"
+
+msgid "Retract filament"
+msgstr "Filamenti geri çek"
+
+msgid "Complete"
+msgstr "Tamamlandı"
+
+msgid "Push filament"
+msgstr "Filamenti it"
+
+msgctxt "Flashforge"
+msgid "Purge old filament"
+msgstr "Eski filamenti temizle"
+
+msgctxt "filament"
+msgid "Unknown"
+msgstr "Bilinmiyor"
+
+msgid "Color Library"
+msgstr "Renk Kitaplığı"
+
+msgid "Print File"
+msgstr "Yazdırma Dosyası"
+
+msgid "Material in the material station"
+msgstr "Malzeme istasyonundaki malzeme"
+
+msgid "Only support selecting materials of the same type"
+msgstr "Yalnızca aynı türdeki malzemelerin seçilmesi desteklenir"
+
+msgid "Filament type and color set in the slicer"
+msgstr "Slicer’da ayarlanan filament türü ve rengi"
+
+msgid "Slot number and the color of the\n"
+"filament in the current slot"
+msgstr ""
+"Mevcut yuvadaki filamentin\n"
+"yuva numarası ve rengi"
+
+msgid "Printing Time"
+msgstr "Yazdırma Süresi"
+
+msgid "IP-Address"
+msgstr "IP Adresi"
+
+msgid "Non-Flashforge build plate detected. Print quality may not be guaranteed."
+msgstr ""
+"Flashforge olmayan baskı tablası algılandı. Baskı kalitesi garanti edilemeyebil"
+"ir."
+
+msgid "Continue printing"
+msgstr "Yazdırmaya devam et"
+
+msgid "Stop printing (replace the build plate)"
+msgstr "Yazdırmayı durdur (baskı tablasını değiştir)"
+
+msgid "Lidar detected first-layer defects. Please check and decide whether to continue printing."
+msgstr ""
+"LiDAR, ilk katmanda kusurlar tespit etti. Lütfen kontrol edin ve yazdırmaya dev"
+"am edip etmeyeceğinize karar verin."
+
+msgid "Continue printing (defects acceptable)"
+msgstr "Yazdırmaya devam et (kusurlar kabul edilebilir)"
+
+msgid "Stop printing"
+msgstr "Yazdırmayı durdur"
+
+msgctxt "Flashforge"
+msgid "Flow Calibration"
+msgstr "Akış Kalibrasyonu"
+
+msgctxt "Flashforge"
+msgid "First Layer Inspection"
+msgstr "İlk Katman Kontrolü"
+
+msgctxt "Flashforge"
+msgid "Downloading"
+msgstr "İndiriliyor"
+
+msgid "Unable to download some videos. Please try again later!"
+msgstr "Bazı videolar indirilemedi. Lütfen daha sonra tekrar deneyin!"
+
+msgid "Failed videos:"
+msgstr "Başarısız videolar:"
+
+msgid "Delete selected file(s)?"
+msgstr "Seçili dosya/dosyalar silinsin mi?"
+
+msgid "Download complete."
+msgstr "İndirme tamamlandı."
+
+msgid "Download failed. Please try again later!"
+msgstr "İndirme başarısız oldu. Lütfen daha sonra tekrar deneyin!"
+
+msgid "The network is unstable. Please try again."
+msgstr "Ağ bağlantısı kararsız. Lütfen tekrar deneyin."
+
+msgid "Lidar focus failure detected. Please check the Lidar."
+msgstr "LiDAR odaklama hatası algılandı. Lütfen LiDAR’ı kontrol edin."
+
+msgid "For an improved experience, please restart Flash Studio to load resources."
+msgstr ""
+
+msgid "Printer out of range. Please home again!"
+msgstr "Yazıcı çalışma alanının dışında. Lütfen yeniden başlangıç konumuna alın!"
+
+msgid "Communication with MCU interrupted!"
+msgstr "MCU ile iletişim kesildi!"
+
+msgid "X/Y/Z/E TMC error: GSTAT!"
+msgstr "X/Y/Z/E TMC hatası: GSTAT!"
+
+msgid "X/Y/Z/E motor TMC chip communication error!"
+msgstr "X/Y/Z/E motor TMC çipi iletişim hatası!"
+
+msgid "MCU: Unable to connect!"
+msgstr "MCU: Bağlanılamıyor!"
+
+msgid "Nozzle temperature below minimum temperature!"
+msgstr "Nozzle sıcaklığı minimum sıcaklığın altında!"
+
+msgid "Extruder T0 not heating as expected!"
+msgstr "Ekstrüder T0 beklenen şekilde ısınmıyor!"
+
+msgid "Extruder T1 not heating as expected!"
+msgstr "Ekstrüder T1 beklenen şekilde ısınmıyor!"
+
+msgid "Heated bed not heating as expected!"
+msgstr "Isıtmalı tabla beklenen şekilde ısınmıyor!"
+
+msgid "Chamber not heating as expected!"
+msgstr "Hazne beklenen şekilde ısınmıyor!"
+
+msgid "Host error. Please restart!"
+msgstr "Host hatası. Lütfen yeniden başlatın!"
+
+msgid "X-axis homing error. X-axis sensor not triggered!"
+msgstr "X ekseni home hatası. X ekseni sensörü tetiklenmedi!"
+
+msgid "Y-axis homing error. Y-axis sensor not triggered!"
+msgstr "Y ekseni home hatası. Y ekseni sensörü tetiklenmedi!"
+
+msgid "Z-axis homing error. Z-axis sensor not triggered!"
+msgstr "Z ekseni home hatası. Z ekseni sensörü tetiklenmedi!"
+
+msgid "Extruder temperature < -10!"
+msgstr "Ekstrüder sıcaklığı < -10!"
+
+msgid "Heated bed temperature < -10!"
+msgstr "Isıtmalı tabla sıcaklığı < -10!"
+
+msgid "Command exceeds queue limit!"
+msgstr "Komut, kuyruk sınırını aşıyor!"
+
+msgid "Language initialization failed. Please retry!"
+msgstr "Dil başlatma işlemi başarısız oldu. Lütfen tekrar deneyin!"
+
+msgid "USB flash drive read error!"
+msgstr "USB bellek okuma hatası!"
+
+msgid "Real-time video service failure!"
+msgstr "Gerçek zamanlı video servisi hatası!"
+
+msgid "Failed to enable the camera. Please check!"
+msgstr "Kamera etkinleştirilemedi. Lütfen kontrol edin!"
+
+msgid "Insufficient storage space!"
+msgstr "Depolama alanı yetersiz!"
+
+msgid "File copy error!"
+msgstr "Dosya kopyalama hatası!"
+
+msgid "Model download failed!"
+msgstr "Model indirilemedi!"
+
+msgid "Leveling sensor data cannot be cleared. Please check!"
+msgstr "Seviyeleme sensörü verileri temizlenemiyor. Lütfen kontrol edin!"
+
+msgid "Leveling sensor not triggered. Please check!"
+msgstr "Seviyeleme sensörü tetiklenmedi. Lütfen kontrol edin!"
+
+msgid "Leveling sensor triggered early. Please check!"
+msgstr "Seviyeleme sensörü erken tetiklendi. Lütfen kontrol edin!"
+
+msgid "Heated bed temperature control error!"
+msgstr "Isıtmalı tabla sıcaklık kontrol hatası!"
+
+msgid "Heated bed heating timeout!"
+msgstr "Isıtmalı tabla ısıtma zaman aşımı!"
+
+msgid "Extruder temperature control error!"
+msgstr "Ekstrüder sıcaklık kontrol hatası!"
+
+msgid "Nozzle too low!"
+msgstr "Nozzle çok alçak!"
+
+msgid "Nozzle too high!"
+msgstr "Nozzle çok yüksek!"
+
+msgid "Chamber heating timeout!"
+msgstr "Hazne ısıtma zaman aşımı!"
+
+msgid "Chamber heating failed. Left heating fan speed too low!"
+msgstr "Hazne ısıtma başarısız. Sol ısıtma fanı hızı çok düşük!"
+
+msgid "Chamber heating failed. Right heating fan speed too low!"
+msgstr "Hazne ısıtma başarısız. Sağ ısıtma fanı hızı çok düşük!"
+
+msgid ""
+"Abnormal chamber temperature. Air outlet temperature sensor may be damaged!"
+msgstr "Hazne sıcaklığı anormal. Hava çıkışı sıcaklık sensörü hasarlı olabilir!"
+
+msgid "Air filter fan speed too low or stopped!"
+msgstr "Hava filtresi fan hızı çok düşük veya fan durdu!"
+
+msgid "Channel 1 feeding timeout!"
+msgstr "Kanal 1 besleme zaman aşımı!"
+
+msgid "Channel 2 feeding timeout!"
+msgstr "Kanal 2 besleme zaman aşımı!"
+
+msgid "Channel 3 feeding timeout!"
+msgstr "Kanal 3 besleme zaman aşımı!"
+
+msgid "Channel 4 feeding timeout!"
+msgstr "Kanal 4 besleme zaman aşımı!"
+
+msgid "Channel 1 retracting timeout!"
+msgstr "Kanal 1 geri çekme zaman aşımı!"
+
+msgid "Channel 2 retracting timeout!"
+msgstr "Kanal 2 geri çekme zaman aşımı!"
+
+msgid "Channel 3 retracting timeout!"
+msgstr "Kanal 3 geri çekme zaman aşımı!"
+
+msgid "Channel 4 retracting timeout!"
+msgstr "Kanal 4 geri çekme zaman aşımı!"
+
+msgid "Failed to feed filament to the extruder!"
+msgstr "Filament ekstrüdere beslenemedi!"
+
+msgid "IFS odometer roller 1/2/3/4 not moving!"
+msgstr "IFS kilometre sayacı silindiri 1/2/3/4 hareket etmiyor!"
+
+msgid "Filament type mismatch!"
+msgstr "Filament türü uyuşmuyor!"
+
+msgid "Abnormal leveling data!"
+msgstr "Seviyeleme verileri anormal!"
+
+msgid "Z-axis print height exceeded"
+msgstr "Z ekseni baskı yüksekliği aşıldı"
+
+msgid "Extruder filament sensor error"
+msgstr "Ekstrüder filament sensörü hatası"
+
+msgid "IFS homing error"
+msgstr "IFS home hatası"
+
+msgid "Exception in priming_handler, please copy the logs!"
+msgstr "priming_handler içinde özel durum oluştu, lütfen logları kopyalayın!"
+
+msgid "Exception in flush_handler, please copy the logs!"
+msgstr "flush_handler içinde özel durum oluştu, lütfen logları kopyalayın!"
+
+msgid "Internal error on command, please copy the logs!"
+msgstr "Komutta dahili hata oluştu, lütfen logları kopyalayın!"
+
+msgid "Timing error, please copy the logs!"
+msgstr "Zamanlama hatası, lütfen logları kopyalayın!"
+
+msgid "System restarted, please copy the logs!"
+msgstr "Sistem yeniden başlatıldı, lütfen logları kopyalayın!"
+
+msgid "The \"spi_transfer_response\" cannot be obtained.!"
+msgstr "“spi_transfer_response” alınamıyor!"
+
+msgid "Extruder temperature error!"
+msgstr "Ekstrüder sıcaklık hatası!"
+
+msgid "platform temperature error!"
+msgstr "platform sıcaklık hatası!"
+
+msgctxt "Flashforge"
+msgid "View Guide"
+msgstr "Kılavuzu Görüntüle"
+
+msgctxt "Flashforge"
+msgid "Close"
+msgstr "Kapat"
+
+msgctxt "Flashforge"
+msgid "Error"
+msgstr "Hata"
+
+msgctxt "GuideWeb"
+msgid "Loading..."
+msgstr "Yükleniyor..."
+
+msgid "Loading failed. Please try again."
+msgstr "Yükleme başarısız oldu. Lütfen tekrar deneyin."
+
+msgctxt "Flashforge"
+msgid "Refer & Earn"
+msgstr "Davet Et ve Kazan"
+
+msgid "Copy Referral Link"
+msgstr "Davet Linkini Kopyala"
+
+msgid "Insufficient points"
+msgstr "Puan yetersiz"
+
+msgid "Generating, please wait..."
+msgstr "Oluşturuluyor, lütfen bekleyin…"
+
+msgid "Generation successful!"
+msgstr "Oluşturma başarılı!"
+
+msgid "You can specify the number of colors for the model."
+msgstr "Model için renk sayısını belirleyebilirsiniz."
+
+msgid "AI 3D Model Generator"
+msgstr "AI 3D Model Oluşturucu"
+
+msgid "Points consumed"
+msgstr "Harcanacak puan"
+
+msgid "Start generating"
+msgstr "Oluşturmaya başla"
+
+msgid "This generation is free"
+msgstr "Bu oluşturma işlemi ücretsiz"
+
+msgid "Remaining points"
+msgstr "Kalan puanlar"
+
+msgid "Image Upload Tips"
+msgstr "Görsel Yükleme Önerileri"
+
+msgid "It supports PNG, JPG, JPEG. Images should be no larger than 6MB with a minimum resolution of 128*128."
+msgstr ""
+"PNG, JPG ve JPEG desteklenir. Görseller en fazla 6 MB olmalı ve minimum çözünür"
+"lük 128*128 olmalıdır."
+
+msgid "Simple background (preferably solid color)"
+msgstr "Arka plan sade olmalı, mümkünse düz renk kullanılmalıdır"
+
+msgid "No text included"
+msgstr "Yazı içermemelidir"
+
+msgid "Single model"
+msgstr "Tek ana nesne olmalıdır"
+
+msgid "The model should not be too small."
+msgstr "Ana nesne çok küçük olmamalıdır"
+
+msgid "We're currently experiencing high demand. Please wait..."
+msgstr "Yoğunluk nedeniyle oluşturma işlemi beklemede. Lütfen bekleyin..."
+
+msgid "Current queue"
+msgstr "Mevcut sıra"
+
+msgid "Maximum image resolution: 5000*5000"
+msgstr "Maksimum görsel çözünürlüğü: 5000*5000"
+
+msgid "Minimum image resolution: 128*128"
+msgstr "Minimum görsel çözünürlüğü: 128*128"
+
+msgid "Maximum image size: "
+msgstr ""
+
+msgid "Failed to load image"
+msgstr "Görsel yüklenemedi"
+
+msgid "A model is currently being generated. Please wait."
+msgstr "Şu anda bir model oluşturuluyor. Lütfen bekleyin."
+
+msgid "Network Error"
+msgstr "Ağ hatası"
+
+msgid "AI Model Generation Failed"
+msgstr "AI model oluşturma başarısız oldu"
+
+msgid "Importing..."
+msgstr "İçe aktarılıyor..."
+
+msgid "Not enough points. Please earn more points."
+msgstr "Puan yetersiz. Lütfen puan kazanın."
+
+msgid "Get Now"
+msgstr "Hemen Kazan"
+
+msgid "Please upload the image."
+msgstr "Lütfen görseli yükleyin."
+
+msgid "Failed to cancel the task"
+msgstr "Görev iptal edilemedi"
+
+msgid "Export log"
+msgstr "Log dışa aktar"
+
+msgid "Exporting, please wait"
+msgstr "Dışa aktarılıyor, lütfen bekleyin"
+
+msgctxt "Flashforge"
+msgid "Export successful"
+msgstr "Dışa aktarma başarılı"
+
+msgid "Export failed, please try again"
+msgstr "Dışa aktarma başarısız oldu, lütfen tekrar deneyin"
+
+msgid "Text to 3D Model"
+msgstr "Metinden 3D Modele"
+
+msgid "Image to 3D Model"
+msgstr "AI ile görselden 3D model oluştur"
+
+msgid "Please enter the content you want to generate. We recommend focusing on a single subject. For example: A brown cat sculpture with a curled tail, in a cartoon style"
+msgstr ""
+"Lütfen oluşturmak istediğiniz içeriği girin. Tek bir nesneye odaklanmanızı öner"
+"iriz. Örneğin: kıvrık kuyruklu, çizgi film tarzında kahverengi bir kedi heykeli"
+
+msgid "Image preprocessing"
+msgstr "Görsel ön işleme"
+
+msgid "Processing image, please wait"
+msgstr "Görsel işleniyor, lütfen bekleyin"
+
+msgid "We will preprocess the image to ensure the best AI model generation results"
+msgstr "En iyi AI model oluşturma sonuçları için görseli ön işlemden geçireceğiz"
+
+msgid "Please confirm if the image meets your expectations"
+msgstr "Lütfen görselin beklentilerinizi karşılayıp karşılamadığını onaylayın"
+
+msgid "Regenerate"
+msgstr "Yeniden oluştur"
+
+msgid "This will cost you %d points. Are you sure you want to regenerate?"
+msgstr ""
+"Bu işlem %d puan harcayacak. Yeniden oluşturmak istediğinizden emin misiniz?"
+
+msgid "What we will do?"
+msgstr "Ne yapacağız?"
+
+msgid "We will preprocess the image, including but not limited to removing the background, reducing complexity, and enhancing colors, to ensure higher-quality model generation results"
+msgstr ""
+"Daha yüksek kaliteli model oluşturma sonuçları elde etmek için arka planı kaldı"
+"rma, karmaşıklığı azaltma ve renkleri iyileştirme dahil ancak bunlarla sınırlı "
+"olmamak üzere görseli ön işlemden geçireceğiz"
+
+msgid "Generate without preprocessing"
+msgstr "Ön işleme yapmadan oluştur"
+
+msgid "Generate model"
+msgstr "Model oluştur"
+
+msgid "Based on our tests, the generation results are excellent. We highly recommend enabling this feature!"
+msgstr ""
+"Testlerimize göre oluşturma sonuçları oldukça iyi. Bu özelliği etkinleştirmeniz"
+"i önemle öneririz!"
+
+msgid "Not Now"
+msgstr "Şimdi Değil"
+
+msgid "Point Consumption Rules"
+msgstr "Puan Tüketim Kuralları"
+
+msgid "Generating a model image based on your text, please wait"
+msgstr "Metninize göre bir model görseli oluşturuluyor, lütfen bekleyin"
+
+msgid "Please select an image to generate a 3D model"
+msgstr "Lütfen 3D model oluşturmak için bir görsel seçin"
+
+msgid "Text optimization"
+msgstr "Metin optimizasyonu"
+
+msgid "Generate image"
+msgstr "Görsel oluştur"
+
+msgid "Points have been consumed. Are you sure you want to stop this generation?"
+msgstr ""
+"Puanlar harcandı. Bu oluşturma işlemini durdurmak istediğinizden emin misiniz?"
+
+msgid "Points"
+msgstr "Puanlar"
+
+msgid "Uploaded images must be square (same width and height)."
+msgstr ""
+"Yüklenen görseller kare olmalıdır (genişlik ve yükseklik aynı olmalıdır)."
+
+msgid "Cannot regenerate. Insufficient points for image or model generation."
+msgstr "Yeniden oluşturulamıyor. Görsel veya model oluşturma için puan yetersiz."
+
+msgid "Please upload your text"
+msgstr "Lütfen metninizi yükleyin"
+
+msgid "You have %d regenerations left for this model generation. Regenerate?"
+msgstr ""
+"Bu model oluşturma için %d yeniden oluşturma hakkınız kaldı. Yeniden oluşturuls"
+"un mu?"
+
+msgid "Not enough regenerations. Cannot regenerate."
+msgstr "Yeniden oluşturma hakkı yetersiz. Yeniden oluşturulamaz."
+
+msgid "You've used your free generation. Stop this generation?"
+msgstr ""
+"Ücretsiz oluşturma hakkınızı kullandınız. Bu oluşturma işlemi durdurulsun mu?"
+
+msgid "No copyright"
+msgstr "Telif hakkı yok"
+
+msgid "Generation failed"
+msgstr "Oluşturma başarısız oldu"
+
+msgid "It's expected to take 1-2 minutes."
+msgstr "Tahmini süre 1-2 dakikadır."
+
+msgid "It's expected to take less than 1 minute."
+msgstr "Tahmini süre 1 dakikadan azdır."
+
+msgid "Print Inspection"
+msgstr ""
+
+msgid "Extruder & Filament"
+msgstr ""
+
+msgid "Edit or load filament after selecting an extruder"
+msgstr ""
+
+msgid "Temperature & Control"
+msgstr ""
+
+msgid "Free Regenerations Left: %d"
+msgstr ""
+
+msgid "This will use 1 free regeneration. Continue?"
+msgstr ""
+
+msgid "Device Info"
+msgstr ""
+
+msgctxt "Flashforge"
+msgid "Submit"
+msgstr "Gönder"
+
+msgid "View Now"
+msgstr "Şimdi Görüntüle"
+
+msgid "Removed from print list"
+msgstr ""
+
+msgid "Report submitted"
+msgstr "Bildirim gönderildi"
+
+msgid "The equipment needs to be updated. Please update the printer versions. The following printer versions require updating to ensure proper operation:"
+msgstr ""
+
+msgid "Please also upgrade the mobile app to the latest version to ensure its normal use."
+msgstr ""
+
+msgid "Full Power! Create Now!"
+msgstr ""
+
+msgid "Select an extruder to edit"
+msgstr ""
+
+msgid "Silent Mode (50%)"
+msgstr ""
+
+msgid "Standard Mode (100%)"
+msgstr ""
+
+msgid "Motion Mode (140%)"
+msgstr ""
+
+msgid "Save tmp zip file"
+msgstr "Geçici ZIP dosyasını kaydet"
+
+msgid "Generating local device id"
+msgstr "Yerel cihaz ID’si oluşturuluyor"
+
+msgid "Upload Complete"
+msgstr "Yükleme tamamlandı"
+
+msgid "Upload Successful"
+msgstr "Yükleme başarılı"
+
+msgid "Upload failed"
+msgstr "Yükleme başarısız"
+
+msgid "Email Address"
+msgstr "E-posta Adresiniz"
+
+msgid "Email cannot be empty."
+msgstr "E-posta adresi boş bırakılamaz."
+
+msgid "%s devices require an update. Please upgrade %s to %s or later, then upgrade again to %s or later. Devices with versions below %s will not be able to connect properly."
+msgstr ""
+
+msgid "%s devices require an update. Please upgrade %s, and the remaining %d devices to %s or later, then upgrade again to %s or later. Devices with versions below %s will not be able to connect properly."
+msgstr ""
+
+msgid "If you cannot detect the new version, you can actively download it via the following link:"
+msgstr ""
+"Yeni sürüm algılanamıyorsa, aşağıdaki bağlantıdan manuel olarak indirebilirsini"
+"z:"
+
+msgid "The printer is not idle"
+msgstr "Yazıcı bekleme durumunda değil"
+
+msgid "Extracting files, please wait..."
+msgstr "Dosyalar çıkarılıyor, lütfen bekleyin..."
+
+msgid "Downloading cloud task..."
+msgstr "Bulut görevi indiriliyor..."
+
+msgid "Sending task..."
+msgstr "Görev gönderiliyor..."
+
+msgid "Cancel slicing?"
+msgstr "Dilimleme iptal edilsin mi?"
+
+msgid "Cancel Slicing"
+msgstr "Dilimlemeyi iptal et"
+
+msgid "Cloud task is slicing..."
+msgstr "Bulut görevi dilimleniyor..."
+
+msgid "Reprint"
+msgstr "Tekrar Baskı Al"
+
+msgid "Failed. Please try printing again."
+msgstr "Başarısız oldu. Lütfen tekrar baskı alın."
+
+msgid "Cancel queue?"
+msgstr "Sıra iptal edilsin mi?"
+
+msgid "Cancel Queue"
+msgstr "Sırayı iptal et"
+
+msgid "Starts slicing and printing once the queue clears."
+msgstr "Kuyruk tamamlandığında dilimleme ve baskı otomatik olarak başlayacak."
+
+msgid "Receiving task..."
+msgstr "Görev alınıyor..."
+
+msgid "Cloud slicing queued..."
+msgstr ""
+
+msgid "Jobs ahead"
+msgstr ""
+
+msgctxt "Flashforge"
+msgid "Mapping"
+msgstr "Eşleme"
+
+msgctxt "Flashforge"
+msgid "After Mapping"
+msgstr "Eşleme sonrası"
+
+msgctxt "Flashforge"
+msgid "Plate"
+msgstr "Plaka"
+
+msgctxt "Flashforge"
+msgid "Original"
+msgstr "Orijinal"
+
+#: resources/data/hints.ini: [hint:Chamber temperature]
+msgid ""
+"Chamber temperature\n"
+"Did you know that Flash Studio supports chamber temperature?"
+msgstr ""
+
+#: resources/data/hints.ini: [hint:Calibration]
+msgid ""
+"Calibration\n"
+"Did you know that calibrating your printer can do wonders? Check out our "
+"beloved calibration solution in Flash Studio."
+msgstr ""
+
+#: resources/data/hints.ini: [hint:Auxiliary fan]
+msgid ""
+"Auxiliary fan\n"
+"Did you know that Flash Studio supports Auxiliary part cooling fan?"
+msgstr ""
+
+#: resources/data/hints.ini: [hint:Air filtration]
+msgid ""
+"Air filtration/Exhaust Fan\n"
+"Did you know that Flash Studio can support Air filtration/Exhaust Fan?"
+msgstr ""
+
+#: resources/data/hints.ini: [hint:How to use keyboard shortcuts]
+msgid ""
+"How to use keyboard shortcuts\n"
+"Did you know that Flash Studio offers a wide range of keyboard shortcuts and "
+"3D scene operations."
+msgstr ""
+
+msgid "C5 or C5P Not Connected"
+msgstr "C5 veya C5P bağlı değil"
+
+msgid "Smart Remapping"
+msgstr "Akıllı Eşleme"
+
+msgid "Hardware Mapping"
+msgstr "Donanım Eşleme"
+
+msgid "Filament Info Synced Successfully"
+msgstr "Filament bilgisi başarıyla senkronize edildi"
+
+msgid "Filament Info Sync Failed"
+msgstr "Filament bilgisi senkronizasyonu başarısız"
+
+msgid "Issue Feedback"
+msgstr "Sorun Bildirimi"
+
+msgid "Feature Request"
+msgstr "Özellik Talebi"
+
+msgid "The feedback has been received and will be processed as soon as possible."
+msgstr "Geri bildirim alındı ve en kısa sürede işlenecektir."
+
+msgid "The feedback has been received."
+msgstr "Geri bildirim alındı."
+
+msgid "This will prevent data from being transmitted to cloud services. Users who only utilize local network functionality can safely enable this option."
+msgstr "Bu, verilerin bulut hizmetlerine iletilmesini engelleyecektir. Yalnızca yerel ağ işlevlerini kullanan kullanıcılar bu seçeneği güvenle etkinleştirebilir."
+
+msgid "Repairing polygon soup"
+msgstr "Çokgen verileri onarılıyor"
+
+msgid "Orienting polygon soup"
+msgstr "Çokgen yönleri ayarlanıyor"
+
+msgid "Converting to mesh"
+msgstr "Ağ yapısına dönüştürülüyor"
+
+msgid "Repairing mesh boundaries"
+msgstr "Ağ sınırları onarılıyor"
+
+msgid "Finalizing repaired mesh"
+msgstr "Onarılan ağ sonlandırılıyor"
+
+msgid "Remapping repaired mesh colors"
+msgstr "Onarılan ağ renkleri yeniden eşleniyor"
+
+#, c-format
+msgid "%lld minutes"
+msgstr "%lld dakika"
+
+#, c-format
+msgid "%lld hours %lld minutes"
+msgstr "%lld saat %lld dakika"
+
+msgid "Click to edit"
+msgstr "Düzenlemek için tıklayın"
+
+msgid "Gradient Mix Weights"
+msgstr "Gradyan karışım ağırlıkları"
+
+msgid "Pick a point in the gradient map to control multi-filament mix."
+msgstr "Çoklu filament karışımını kontrol etmek için gradyan haritasında bir nokta seçin."
+
+msgid "The multicolor filament limit has been reached. Reopen the project and try again."
+msgstr "Çok renkli filament sınırına ulaşıldı. Projeyi yeniden açıp tekrar deneyin."
+
+msgid ""
+"Do you want to synchronize your personal presets with FlashForge Cloud?\n"
+"It contains the following information:\n"
+"1. The Process presets\n"
+"2. The Filament presets\n"
+"3. The Printer presets"
+msgstr ""
+"Kişisel ön ayarlarınızı FlashForge Cloud ile senkronize etmek istiyor musunuz?\n"
+"Aşağıdaki bilgileri içerir:\n"
+"1. Süreç ön ayarları\n"
+"2. Filament ön ayarları\n"
+"3. Yazıcı ön ayarları"
+
+msgid "To help us identify and resolve your issue more quickly, we recommend uploading your device and app logs. The logs are used solely for troubleshooting and will not collect any of your personal information."
+msgstr "Sorununuzu daha hızlı tespit edip çözebilmemiz için, cihaz ve uygulama günlüklerini yüklemenizi öneririz. Günlükler yalnızca sorun analizi amacıyla kullanılır; kişisel bilgileriniz toplanmaz."
+
+msgid "orca software Logs"
+msgstr "Dilim Günlüğü"
+
+msgid "orca software Operation Logs"
+msgstr "Dilim Yazılımı İşlem Günlüğü"
+
+msgid "App Logs"
+msgstr "Uygulama Günlüğü"
+
+msgid "App Operation Logs"
+msgstr "Uygulama İşlem Günlüğü"
+
+msgid "Device Logs"
+msgstr "Cihaz Günlüğü"
+
+msgid "Device Operation Logs"
+msgstr "Cihaz İşlem Günlüğü"
+
+msgid "Select a Device"
+msgstr "Cihaz seçimi"
+
+msgid "{device} device is currently offline, so we are unable to retrieve the device logs at this time. You can still submit feedback. Once the device is back online, you can submit feedback again or go to Settings > Upload Firmware Log to upload the device logs."
+msgstr "{device} Cihaz şu anda çevrimdışı durumda olduğundan, cihaz günlüğüne geçici olarak erişilemiyor. Yine de geri bildirim gönderebilirsiniz; cihaz tekrar çevrimiçi hale geldiğinde, geri bildiriminizi yeniden gönderebilir veya Ayarlar > Firmware Günlüğünü Yükle seçeneğine giderek cihaz günlüğünü yükleyebilirsiniz."
+
+msgid "Slice Log"
+msgstr "Dilim Günlüğü"
+
+msgid "App Log"
+msgstr "Uygulama Günlüğü"
+
+msgid "Device Log"
+msgstr "Cihaz Günlüğü"
+
+msgid "The current device is offline, so we are unable to retrieve the device logs at this time. You can still submit feedback. Once the device is back online, you can submit feedback again or go to Settings > Upload Firmware Log to upload the device logs."
+msgstr "Cihaz şu anda çevrimdışı durumda olduğundan, cihaz günlüğüne geçici olarak erişilemiyor. Yine de geri bildirim gönderebilirsiniz; cihaz tekrar çevrimiçi hale geldiğinde, geri bildiriminizi yeniden gönderebilir veya Ayarlar > Firmware Günlüğünü Yükle seçeneğine giderek cihaz günlüğünü yükleyebilirsiniz."
+
+msgid "Slicing software operation log"
+msgstr "Dilim Yazılımı İşlem Günlüğü"
+
+msgid "App operation log"
+msgstr "Uygulama İşlem Günlüğü"
+
+msgid "Device operation log"
+msgstr "Cihaz İşlem Günlüğü"
+
+msgid "Add Device"
+msgstr "Cihaz Ekle"
+
+msgid "Select Device"
+msgstr "Cihaz Seç"

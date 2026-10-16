@@ -51,6 +51,16 @@ public:
     // single color
     StateColor(unsigned long color);
 
+    // operator==
+    bool operator==(StateColor const& other) const{
+        return statesList_ == other.statesList_ && colors_ == other.colors_ && takeFocusedAsHovered_ == other.takeFocusedAsHovered_;
+    };
+
+    // operator!=
+    bool operator!=(StateColor const& other) const{
+        return !(*this == other);
+    };
+
 public:
     void append(wxColour const & color, int states);
 
@@ -68,7 +78,7 @@ public:
 public:
     wxColour defaultColor();
 
-    wxColour colorForStates(int states);
+    wxColour colorForStates(int states) const;
 
     wxColour colorForStatesNoDark(int states);
 

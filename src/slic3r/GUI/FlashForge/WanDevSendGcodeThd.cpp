@@ -133,6 +133,8 @@ int WanDevSendGcodeThd::startCloundJob(const char *accessToken, const fnet_cloun
     jobData.thumbStorageKey = cloundGcodeData->thumbStorageKey;
     jobData.thumbStorageUrl = cloundGcodeData->thumbStorageUrl;
     jobData.printNow = m_sendGcodeData.printNow;
+    jobData.plateNo              = m_comSendGcodeData.currentPlaterIndex;
+    jobData.unionId              = m_comSendGcodeData.unionId.c_str();
     jobData.levelingBeforePrint = m_sendGcodeData.levelingBeforePrint;
     jobData.flowCalibration = m_sendGcodeData.flowCalibration;
     jobData.firstLayerInspection = m_sendGcodeData.firstLayerInspection;

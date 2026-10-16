@@ -47,25 +47,25 @@ WebViewPanel::WebViewPanel(wxWindow *parent)
     // Create the button
     bSizer_toolbar = new wxBoxSizer(wxHORIZONTAL);
 
-    m_button_back = new wxButton(this, wxID_ANY, wxT("Back"), wxDefaultPosition, wxDefaultSize, 0);
+    m_button_back = new wxButton(this, wxID_ANY, _L("Back"), wxDefaultPosition, wxDefaultSize, 0);
     m_button_back->Enable(false);
     bSizer_toolbar->Add(m_button_back, 0, wxALL, 5);
 
-    m_button_forward = new wxButton(this, wxID_ANY, wxT("Forward"), wxDefaultPosition, wxDefaultSize, 0);
+    m_button_forward = new wxButton(this, wxID_ANY, _L("Forward"), wxDefaultPosition, wxDefaultSize, 0);
     m_button_forward->Enable(false);
     bSizer_toolbar->Add(m_button_forward, 0, wxALL, 5);
 
-    m_button_stop = new wxButton(this, wxID_ANY, wxT("Stop"), wxDefaultPosition, wxDefaultSize, 0);
+    m_button_stop = new wxButton(this, wxID_ANY, _L("Stop"), wxDefaultPosition, wxDefaultSize, 0);
 
     bSizer_toolbar->Add(m_button_stop, 0, wxALL, 5);
 
-    m_button_reload = new wxButton(this, wxID_ANY, wxT("Reload"), wxDefaultPosition, wxDefaultSize, 0);
+    m_button_reload = new wxButton(this, wxID_ANY, _L("Reload"), wxDefaultPosition, wxDefaultSize, 0);
     bSizer_toolbar->Add(m_button_reload, 0, wxALL, 5);
 
     m_url = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     bSizer_toolbar->Add(m_url, 1, wxALL | wxEXPAND, 5);
 
-    m_button_tools = new wxButton(this, wxID_ANY, wxT("Tools"), wxDefaultPosition, wxDefaultSize, 0);
+    m_button_tools = new wxButton(this, wxID_ANY, _L("Tools"), wxDefaultPosition, wxDefaultSize, 0);
     bSizer_toolbar->Add(m_button_tools, 0, wxALL, 5);
 
     topsizer->Add(bSizer_toolbar, 0, wxEXPAND, 0);
@@ -88,6 +88,7 @@ WebViewPanel::WebViewPanel(wxWindow *parent)
         wxLogError("Could not init m_browser");
         return;
     }
+    WebView::AddOpenNewWindowScript(m_browser);
     m_browser->Hide();
     SetSizer(topsizer);
 
@@ -428,11 +429,11 @@ void WebViewPanel::SetLoginPanelVisibility(bool bshow)
     wxString strJS = wxString::Format("SetLoginPanelVisibility(%s)", bshow ? "true" : "false");
     RunScript(strJS);
 }
-void WebViewPanel::SendRecentList(int images)
+void WebViewPanel::SendRecentList()
 {
     boost::property_tree::wptree req;
     boost::property_tree::wptree data;
-    wxGetApp().mainframe->get_recent_projects(data, images);
+    wxGetApp().mainframe->get_recent_projects(data);
     req.put(L"sequence_id", "");
     req.put(L"command", L"get_recent_projects");
     req.put_child(L"response", data);
@@ -490,7 +491,10 @@ void WebViewPanel::SendLoginInfo()
 void WebViewPanel::ShowNetpluginTip()
 {
     // Install Network Plugin
-    //std::string NP_Installed = wxGetApp().app_config->get("installed_networking");
+    const auto bblnetwork_enabled =wxGetApp().app_config->get_bool("installed_networking");
+    if(!bblnetwork_enabled) {
+        return;
+    }
     bool        bValid       = wxGetApp().is_compatibility_version();
 
     int nShow = 0;
@@ -505,6 +509,31 @@ void WebViewPanel::ShowNetpluginTip()
 
     wxString strJS = wxString::Format("window.postMessage(%s)", m_Res.dump(-1, ' ', false, json::error_handler_t::ignore));
 
+    RunScript(strJS);
+}
+
+void WebViewPanel::SendCloudProvidersInfo()
+{
+    auto* app_config = wxGetApp().app_config;
+    if (!app_config)
+        return;
+
+    json j;
+    j["command"] = "cloud_providers_info";
+    json data;
+    json provider_array = json::array();
+
+    if (!app_config->get_hide_login_side_panel()) {
+        auto providers = app_config->get_cloud_providers();
+        for (const auto& p : providers) {
+            provider_array.push_back(p);
+        }
+    }
+
+    data["providers"] = provider_array;
+    j["data"] = data;
+
+    wxString strJS = wxString::Format("window.postMessage(%s)", j.dump());
     RunScript(strJS);
 }
 
@@ -546,7 +575,7 @@ void WebViewPanel::update_mode()
     */
 void WebViewPanel::OnNavigationRequest(wxWebViewEvent& evt)
 {
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetTarget().ToUTF8().data();
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetURL().ToUTF8().data();
     const wxString &url = evt.GetURL();
     if (url.StartsWith("File://") || url.StartsWith("file://")) {
         if (!url.Contains("/web/homepage/index.html")) {
@@ -554,6 +583,8 @@ void WebViewPanel::OnNavigationRequest(wxWebViewEvent& evt)
 #ifdef _WIN32
             if (file.StartsWith('/'))
                 file = file.Mid(1);
+            else
+                file = "//" + file; // When file from network location
 #endif
             wxGetApp().plater()->load_files(wxArrayString{1, &file});
             evt.Veto();
@@ -590,7 +621,7 @@ void WebViewPanel::OnNavigationComplete(wxWebViewEvent& evt)
 {
     m_browser->Show();
     Layout();
-    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetTarget().ToUTF8().data();
+    BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetURL().ToUTF8().data();
     if (wxGetApp().get_mode() == comDevelop)
         wxLogMessage("%s", "Navigation complete; url='" + evt.GetURL() + "'");
     UpdateState();
@@ -610,6 +641,7 @@ void WebViewPanel::OnDocumentLoaded(wxWebViewEvent& evt)
             wxLogMessage("%s", "Document loaded; url='" + evt.GetURL() + "'");
     }
     UpdateState();
+    SendCloudProvidersInfo();
 }
 
 void WebViewPanel::OnTitleChanged(wxWebViewEvent &evt)
@@ -644,6 +676,16 @@ void WebViewPanel::OnNewWindow(wxWebViewEvent& evt)
 
 void WebViewPanel::OnScriptMessage(wxWebViewEvent& evt)
 {
+    wxString url;
+    if (WebView::TryGetOpenNewWindowUrl(evt, &url)) {
+        if (m_tools_handle_new_window != nullptr && m_tools_handle_new_window->IsChecked()) {
+            m_browser->LoadURL(url);
+        } else {
+            wxLaunchDefaultBrowser(url, wxBROWSER_NEW_WINDOW);
+        }
+        return;
+    }
+
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetString().ToUTF8().data();
     // update login status
     if (m_LoginUpdateTimer == nullptr) {

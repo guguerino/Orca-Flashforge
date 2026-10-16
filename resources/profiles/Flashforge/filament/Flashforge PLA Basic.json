@@ -2,11 +2,14 @@
     "filament_settings_id": [
         "Flashforge PLA Basic"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "inherits": "Flashforge Generic PLA",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Basic",
+    "setting_id": "5XKGaHUjxHECbnHO",
     "version": "2.1.1.0"
 }

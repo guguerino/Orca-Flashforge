@@ -1,4 +1,7 @@
 {
+    "compatible_printers": [
+        "Flashforge AD5X 0.6 nozzle"
+    ],
     "cool_plate_temp": [
         "45"
     ],
@@ -20,18 +23,18 @@
     "filament_settings_id": [
         "Flashforge TPU 95A @FF AD5X 0.6 nozzle"
     ],
-    "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge AD5X 0.6 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "inherits": "Flashforge Generic TPU",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge TPU 95A @FF AD5X 0.6 nozzle",
     "nozzle_temperature_initial_layer": [
         "220"
     ],
+    "setting_id": "TPbHmcFyPyjvoERv",
     "slow_down_layer_time": [
         "12"
     ],

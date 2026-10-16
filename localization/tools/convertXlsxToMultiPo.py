@@ -4,7 +4,7 @@ import traceback
 import openpyxl
 import polib
 
-# ´Ópo×Ö·û´®»ñÈ¡Ô­×Ö·û´®
+# ä»poå­—ç¬¦ä¸²è·å–åŸå­—ç¬¦ä¸²
 def _getSrcMsgid(fromStr):
     toStr = ""
     for line in fromStr.splitlines():

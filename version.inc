@@ -4,13 +4,10 @@
 set(SLIC3R_APP_NAME "Flash Studio")
 set(SLIC3R_APP_KEY "Orca-Flashforge")
 
-if(NOT DEFINED BBL_RELEASE_TO_PUBLIC)
-set(BBL_RELEASE_TO_PUBLIC "1")
-endif()
 if(NOT DEFINED BBL_INTERNAL_TESTING)
 set(BBL_INTERNAL_TESTING "0")
 endif()
-set(Orca_Flashforge_VERSION "1.7.0")
+set(Orca_Flashforge_VERSION "1.7.15")
 string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)"
        Orca_Flashforge_VERSION_MATCH ${Orca_Flashforge_VERSION})
 set(Orca_Flashforge_VERSION_MAJOR ${CMAKE_MATCH_1})
@@ -18,4 +15,7 @@ set(Orca_Flashforge_VERSION_MINOR ${CMAKE_MATCH_2})
 set(Orca_Flashforge_VERSION_PATCH ${CMAKE_MATCH_3})
 
 set(SLIC3R_VERSION "01.10.01.50")
-set(SoftFever_VERSION "2.3.0")
+set(SoftFever_VERSION "2.4.2")
+if (NOT DEFINED ORCA_UPDATER_SIG_KEY)
+    set(ORCA_UPDATER_SIG_KEY "" CACHE STRING "Base64url encoded updater signature key")
+endif()

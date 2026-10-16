@@ -1,4 +1,7 @@
 {
+    "compatible_printers": [
+        "Flashforge AD5X 0.8 nozzle"
+    ],
     "cool_plate_temp": [
         "0"
     ],
@@ -20,15 +23,15 @@
     "filament_settings_id": [
         "Flashforge ABS Basic @FF AD5X 0.8 nozzle"
     ],
-    "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge AD5X 0.8 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "inherits": "Flashforge Generic ABS",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge ABS Basic @FF AD5X 0.8 nozzle",
+    "setting_id": "cIxbQMVdG5K85rJr",
     "textured_cool_plate_temp": [
         "0"
     ],

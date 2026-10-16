@@ -8,6 +8,7 @@
 #include "Flow.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
+#include "LocalZOrderOptimizer.hpp"
 #include "ShortestPath.hpp"
 #include "Thread.hpp"
 #include "Time.hpp"
@@ -16,12 +17,15 @@
 #include "GCode/WipeTower2.hpp"
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
+#include "MaterialType.hpp"
+#include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "format.hpp"
 #include <float.h>
 
 #include <algorithm>
 #include <limits>
+#include <numeric>
 #include <unordered_set>
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
@@ -36,6 +40,7 @@
 #include "nlohmann/json.hpp"
 
 #include "GCode/ConflictChecker.hpp"
+#include "ParameterUtils.hpp"
 
 #include <codecvt>
 
@@ -52,9 +57,498 @@ template class PrintState<PrintObjectStep, posCount>;
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}
 PrintRegion::PrintRegion(PrintRegionConfig &&config) : PrintRegion(std::move(config), config.hash()) {}
 
+// Estimate how many Local-Z unplanned wipe-tower reserve slots are needed for
+// a given print layer height (used when building the wipe tower plan).
+static size_t estimate_local_z_wipe_tower_reserve_slots(const PrintObject& print_object, coordf_t print_z)
+{
+    const Layer* object_layer = print_object.get_layer_at_printz(print_z, EPSILON);
+    if (object_layer == nullptr)
+        return 0;
+
+    const auto& intervals = print_object.local_z_intervals();
+    const auto& plans     = print_object.local_z_sublayer_plan();
+    if (intervals.empty() || plans.empty())
+        return 0;
+
+    const size_t layer_id = size_t(object_layer->id());
+    const auto interval_it = std::find_if(intervals.begin(), intervals.end(), [layer_id](const LocalZInterval& interval) {
+        return interval.layer_id == layer_id;
+    });
+    if (interval_it == intervals.end() || !interval_it->has_mixed_paint || interval_it->sublayer_count <= 1 ||
+        interval_it->first_sublayer_idx >= plans.size()) {
+        return 0;
+    }
+
+    const size_t first_idx = interval_it->first_sublayer_idx;
+    const size_t end_idx   = std::min(plans.size(), first_idx + interval_it->sublayer_count);
+    size_t reserve_slots = 0;
+    int    previous_extruder = -1;
+    for (size_t plan_idx = first_idx; plan_idx < end_idx; ++plan_idx) {
+        const SubLayerPlan& plan = plans[plan_idx];
+        if (!plan.split_interval)
+            continue;
+
+        for (size_t extruder_id = 0; extruder_id < plan.painted_masks_by_extruder.size(); ++extruder_id) {
+            if (plan.painted_masks_by_extruder[extruder_id].empty())
+                continue;
+            if (previous_extruder != int(extruder_id)) {
+                ++reserve_slots;
+                previous_extruder = int(extruder_id);
+            }
+        }
+    }
+
+    if (reserve_slots > 0)
+        ++reserve_slots;
+    return reserve_slots;
+}
+
+namespace {
+
+struct LocalZWipeTowerToolchange
+{
+    unsigned int old_tool { 0 };
+    unsigned int new_tool { 0 };
+};
+
+struct LocalZWipeTowerPassRef
+{
+    size_t                    layer_to_print_idx { 0 };
+    const SubLayerPlan       *plan { nullptr };
+    std::vector<unsigned int> extruders;
+};
+
+static inline ExPolygons local_z_compensate_masks_for_wipe_tower(const ExPolygons &src_masks,
+                                                                 const float       delta_scaled,
+                                                                 const bool        fallback_to_source)
+{
+    if (src_masks.empty() || std::abs(delta_scaled) <= EPSILON)
+        return src_masks;
+
+    ExPolygons compensated = offset_ex(src_masks, delta_scaled);
+    if (!compensated.empty() && compensated.size() > 1)
+        compensated = union_ex(compensated);
+
+    if (compensated.empty() && fallback_to_source)
+        return src_masks;
+    return compensated;
+}
+
+static bool local_z_segments_exist(Polylines segments)
+{
+    for (Polyline &segment : segments) {
+        if (segment.is_valid())
+            return true;
+    }
+    return false;
+}
+
+static bool extrusion_collection_has_local_z_perimeter_segment(const ExtrusionEntityCollection &source,
+                                                               const ExPolygons               &include_masks)
+{
+    if (source.entities.empty() || include_masks.empty())
+        return false;
+
+    ExtrusionEntityCollection flattened = source.flatten(false);
+    for (const ExtrusionEntity *entity : flattened.entities) {
+        if (const auto *path = dynamic_cast<const ExtrusionPath*>(entity)) {
+            if (local_z_segments_exist(intersection_pl(Polylines{path->polyline.to_polyline()}, include_masks)))
+                return true;
+        } else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath*>(entity)) {
+            for (const ExtrusionPath &path : multipath->paths) {
+                if (local_z_segments_exist(intersection_pl(Polylines{path.polyline.to_polyline()}, include_masks)))
+                    return true;
+            }
+        } else if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(entity)) {
+            for (const ExtrusionPath &path : loop->paths) {
+                if (local_z_segments_exist(intersection_pl(Polylines{path.polyline.to_polyline()}, include_masks)))
+                    return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool layer_has_local_z_perimeters(const Layer &layer, const ExPolygons &pass_masks)
+{
+    if (pass_masks.empty())
+        return false;
+
+    for (const LayerRegion *layer_region : layer.regions()) {
+        for (const ExtrusionEntity *entity : layer_region->perimeters.entities) {
+            const auto *extrusions = dynamic_cast<const ExtrusionEntityCollection*>(entity);
+            if (extrusions == nullptr)
+                continue;
+            if (extrusion_collection_has_local_z_perimeter_segment(*extrusions, pass_masks))
+                return true;
+        }
+    }
+
+    return false;
+}
+
+static inline int shared_local_z_extruder_for_wipe_tower(const std::vector<unsigned int> &lhs,
+                                                         const std::vector<unsigned int> &rhs)
+{
+    for (unsigned int extruder_id : lhs) {
+        if (std::find(rhs.begin(), rhs.end(), extruder_id) != rhs.end())
+            return static_cast<int>(extruder_id);
+    }
+    return -1;
+}
+
+static std::vector<unsigned int> rotate_extruders_to_start_with(const std::vector<unsigned int> &extruders,
+                                                                unsigned int                      start_extruder)
+{
+    std::vector<unsigned int> rotated = extruders;
+    auto it = std::find(rotated.begin(), rotated.end(), start_extruder);
+    if (it != rotated.end())
+        std::rotate(rotated.begin(), it, rotated.end());
+    return rotated;
+}
+
+static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolchanges(
+    const Print                              &print,
+    const std::vector<GCode::LayerToPrint>   &layers,
+    int                                       start_extruder)
+{
+    std::vector<LocalZWipeTowerPassRef> pass_refs;
+    const bool  local_z_whole_objects_enabled = print.full_print_config().opt_bool("dithering_local_z_whole_objects");
+    const float local_z_perimeter_mask_expand =
+        float(scale_(LocalZOrderOptimizer::perimeter_mask_expand_mm));
+
+    for (size_t layer_to_print_idx = 0; layer_to_print_idx < layers.size(); ++layer_to_print_idx) {
+        const GCode::LayerToPrint &layer_to_print = layers[layer_to_print_idx];
+        if (layer_to_print.object_layer == nullptr)
+            continue;
+
+        const PrintObject *print_object =
+            layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
+        if (print_object == nullptr)
+            continue;
+
+        const size_t       layer_id   = size_t(layer_to_print.object_layer->id());
+        const auto        &intervals  = print_object->local_z_intervals();
+        const auto        &plans      = print_object->local_z_sublayer_plan();
+        const auto interval_it = std::find_if(intervals.begin(), intervals.end(), [layer_id](const LocalZInterval &interval) {
+            return interval.layer_id == layer_id;
+        });
+        if (interval_it == intervals.end() || !interval_it->has_mixed_paint || interval_it->sublayer_count <= 1 ||
+            interval_it->first_sublayer_idx >= plans.size()) {
+            continue;
+        }
+
+        const size_t first_idx = interval_it->first_sublayer_idx;
+        const size_t end_idx   = std::min(plans.size(), first_idx + interval_it->sublayer_count);
+        for (size_t plan_idx = first_idx; plan_idx < end_idx; ++plan_idx) {
+            const SubLayerPlan &plan = plans[plan_idx];
+            if (!plan.split_interval)
+                continue;
+
+            const size_t plan_mask_slots =
+                std::max(plan.painted_masks_by_extruder.size(), plan.fixed_painted_masks_by_extruder.size());
+            std::vector<ExPolygons> compensated_masks_by_extruder(plan_mask_slots, ExPolygons());
+
+            ExPolygons fixed_raw_masks_union;
+            for (const ExPolygons &fixed_masks : plan.fixed_painted_masks_by_extruder) {
+                if (!fixed_masks.empty())
+                    append(fixed_raw_masks_union, fixed_masks);
+            }
+            if (!fixed_raw_masks_union.empty() && fixed_raw_masks_union.size() > 1)
+                fixed_raw_masks_union = union_ex(fixed_raw_masks_union);
+
+            const ExPolygons fixed_compensated_guard =
+                fixed_raw_masks_union.empty() ?
+                    ExPolygons() :
+                    local_z_compensate_masks_for_wipe_tower(fixed_raw_masks_union, local_z_perimeter_mask_expand, true);
+
+            for (size_t extruder_id = 0; extruder_id < plan_mask_slots; ++extruder_id) {
+                const ExPolygons mixed_raw_masks =
+                    extruder_id < plan.painted_masks_by_extruder.size() ? plan.painted_masks_by_extruder[extruder_id] : ExPolygons();
+                const ExPolygons fixed_raw_masks =
+                    extruder_id < plan.fixed_painted_masks_by_extruder.size() ? plan.fixed_painted_masks_by_extruder[extruder_id] :
+                                                                               ExPolygons();
+                if (mixed_raw_masks.empty() && fixed_raw_masks.empty())
+                    continue;
+
+                ExPolygons compensated;
+                if (!mixed_raw_masks.empty()) {
+                    ExPolygons compensated_mixed =
+                        local_z_compensate_masks_for_wipe_tower(mixed_raw_masks, local_z_perimeter_mask_expand, true);
+                    if (local_z_whole_objects_enabled && !fixed_compensated_guard.empty())
+                        compensated_mixed = diff_ex(compensated_mixed, fixed_compensated_guard);
+                    if (!compensated_mixed.empty())
+                        append(compensated, compensated_mixed);
+                }
+                if (!fixed_raw_masks.empty())
+                    append(compensated, fixed_raw_masks);
+                if (!compensated.empty() && compensated.size() > 1)
+                    compensated = union_ex(compensated);
+                compensated_masks_by_extruder[extruder_id] = std::move(compensated);
+            }
+
+            LocalZWipeTowerPassRef pass_ref;
+            pass_ref.layer_to_print_idx = layer_to_print_idx;
+            pass_ref.plan               = &plan;
+            for (size_t extruder_id = 0; extruder_id < plan.painted_masks_by_extruder.size(); ++extruder_id) {
+                if (extruder_id >= compensated_masks_by_extruder.size())
+                    continue;
+                const ExPolygons &pass_masks = compensated_masks_by_extruder[extruder_id];
+                if (pass_masks.empty())
+                    continue;
+                if (layer_has_local_z_perimeters(*layer_to_print.object_layer, pass_masks))
+                    pass_ref.extruders.push_back(unsigned(extruder_id));
+            }
+
+            if (!pass_ref.extruders.empty())
+                pass_refs.emplace_back(std::move(pass_ref));
+        }
+    }
+
+    std::sort(pass_refs.begin(), pass_refs.end(), [](const LocalZWipeTowerPassRef &lhs, const LocalZWipeTowerPassRef &rhs) {
+        assert(lhs.plan != nullptr && rhs.plan != nullptr);
+        if (lhs.plan->print_z != rhs.plan->print_z)
+            return lhs.plan->print_z < rhs.plan->print_z;
+        if (lhs.layer_to_print_idx != rhs.layer_to_print_idx)
+            return lhs.layer_to_print_idx < rhs.layer_to_print_idx;
+        return lhs.plan->pass_index < rhs.plan->pass_index;
+    });
+
+    auto collect_toolchanges_legacy = [&](int start_tool) {
+        std::vector<LocalZWipeTowerToolchange> legacy_toolchanges;
+        int active_extruder = start_tool;
+        size_t pass_ref_idx = 0;
+        while (pass_ref_idx < pass_refs.size()) {
+            size_t pass_group_end = pass_ref_idx + 1;
+            while (pass_group_end < pass_refs.size() &&
+                   std::abs(pass_refs[pass_ref_idx].plan->print_z - pass_refs[pass_group_end].plan->print_z) <= EPSILON) {
+                ++pass_group_end;
+            }
+
+            std::vector<unsigned int> pass_group_extruders;
+            for (size_t group_idx = pass_ref_idx; group_idx < pass_group_end; ++group_idx)
+                for (unsigned int extruder_id : pass_refs[group_idx].extruders)
+                    if (std::find(pass_group_extruders.begin(), pass_group_extruders.end(), extruder_id) == pass_group_extruders.end())
+                        pass_group_extruders.push_back(extruder_id);
+
+            std::vector<unsigned int> next_group_extruders;
+            if (pass_group_end < pass_refs.size()) {
+                size_t next_group_end = pass_group_end + 1;
+                while (next_group_end < pass_refs.size() &&
+                       std::abs(pass_refs[pass_group_end].plan->print_z - pass_refs[next_group_end].plan->print_z) <= EPSILON) {
+                    ++next_group_end;
+                }
+                for (size_t group_idx = pass_group_end; group_idx < next_group_end; ++group_idx)
+                    for (unsigned int extruder_id : pass_refs[group_idx].extruders)
+                        if (std::find(next_group_extruders.begin(), next_group_extruders.end(), extruder_id) == next_group_extruders.end())
+                            next_group_extruders.push_back(extruder_id);
+            }
+
+            const int preferred_last_extruder =
+                shared_local_z_extruder_for_wipe_tower(pass_group_extruders, next_group_extruders);
+            const std::vector<unsigned int> ordered_group_extruders =
+                LocalZOrderOptimizer::order_bucket_extruders(pass_group_extruders, active_extruder, preferred_last_extruder);
+
+            for (unsigned int extruder_id : ordered_group_extruders) {
+                if (active_extruder >= 0 && active_extruder != int(extruder_id))
+                    legacy_toolchanges.push_back(LocalZWipeTowerToolchange{unsigned(active_extruder), extruder_id});
+                active_extruder = int(extruder_id);
+            }
+
+            pass_ref_idx = pass_group_end;
+        }
+
+        return legacy_toolchanges;
+    };
+
+    const bool dependency_chain_mode =
+        !pass_refs.empty() &&
+        std::all_of(pass_refs.begin(), pass_refs.end(), [](const LocalZWipeTowerPassRef &pass_ref) {
+            return pass_ref.plan != nullptr && pass_ref.plan->dependency_group != 0;
+        });
+    if (!dependency_chain_mode)
+        return collect_toolchanges_legacy(start_extruder);
+
+    struct ChainKey {
+        size_t layer_to_print_idx { 0 };
+        size_t dependency_group { 0 };
+
+        bool operator<(const ChainKey &rhs) const
+        {
+            if (layer_to_print_idx != rhs.layer_to_print_idx)
+                return layer_to_print_idx < rhs.layer_to_print_idx;
+            return dependency_group < rhs.dependency_group;
+        }
+    };
+    struct PassState {
+        const LocalZWipeTowerPassRef *pass_ref { nullptr };
+        std::vector<unsigned int>     remaining_extruders;
+        size_t                        chain_idx { 0 };
+        size_t                        chain_pos { 0 };
+        bool                          ready { false };
+        bool                          completed { false };
+    };
+
+    std::map<ChainKey, size_t> chain_index_by_key;
+    std::vector<std::vector<size_t>> chains;
+    std::vector<PassState>           pass_states;
+    pass_states.reserve(pass_refs.size());
+    for (const LocalZWipeTowerPassRef &pass_ref : pass_refs) {
+        ChainKey chain_key { pass_ref.layer_to_print_idx, pass_ref.plan->dependency_group };
+        auto [it_chain, inserted] = chain_index_by_key.emplace(chain_key, chains.size());
+        if (inserted)
+            chains.emplace_back();
+
+        const size_t chain_idx = it_chain->second;
+        const size_t pass_state_idx = pass_states.size();
+        pass_states.push_back(PassState{ &pass_ref, pass_ref.extruders, chain_idx, 0, false, false });
+        chains[chain_idx].push_back(pass_state_idx);
+    }
+
+    for (std::vector<size_t> &chain : chains) {
+        std::sort(chain.begin(), chain.end(), [&pass_states](size_t lhs_idx, size_t rhs_idx) {
+            const SubLayerPlan &lhs = *pass_states[lhs_idx].pass_ref->plan;
+            const SubLayerPlan &rhs = *pass_states[rhs_idx].pass_ref->plan;
+            if (lhs.dependency_order != rhs.dependency_order)
+                return lhs.dependency_order < rhs.dependency_order;
+            if (std::abs(lhs.print_z - rhs.print_z) > EPSILON)
+                return lhs.print_z < rhs.print_z;
+            return lhs.pass_index < rhs.pass_index;
+        });
+        for (size_t chain_pos = 0; chain_pos < chain.size(); ++chain_pos)
+            pass_states[chain[chain_pos]].chain_pos = chain_pos;
+        if (!chain.empty())
+            pass_states[chain.front()].ready = true;
+    }
+
+    auto pass_contains_extruder = [](const PassState &pass_state, unsigned int extruder_id) {
+        return std::find(pass_state.remaining_extruders.begin(), pass_state.remaining_extruders.end(), extruder_id) !=
+               pass_state.remaining_extruders.end();
+    };
+
+    auto choose_ready_extruder = [&](int active_extruder) -> int {
+        std::vector<unsigned int> ready_extruders;
+        for (const PassState &pass_state : pass_states) {
+            if (!pass_state.ready || pass_state.completed)
+                continue;
+            for (unsigned int extruder_id : pass_state.remaining_extruders)
+                if (std::find(ready_extruders.begin(), ready_extruders.end(), extruder_id) == ready_extruders.end())
+                    ready_extruders.push_back(extruder_id);
+        }
+        if (ready_extruders.empty())
+            return -1;
+        if (active_extruder >= 0 &&
+            std::find(ready_extruders.begin(), ready_extruders.end(), unsigned(active_extruder)) != ready_extruders.end()) {
+            return active_extruder;
+        }
+
+        int    best_extruder = -1;
+        size_t best_ready_count = 0;
+        size_t best_future_count = 0;
+        for (unsigned int extruder_id : ready_extruders) {
+            size_t ready_count = 0;
+            size_t future_count = 0;
+            for (const PassState &pass_state : pass_states) {
+                if (pass_state.completed || !pass_contains_extruder(pass_state, extruder_id))
+                    continue;
+                ++future_count;
+                if (pass_state.ready)
+                    ++ready_count;
+            }
+
+            if (best_extruder < 0 ||
+                ready_count > best_ready_count ||
+                (ready_count == best_ready_count && future_count > best_future_count) ||
+                (ready_count == best_ready_count && future_count == best_future_count && extruder_id < unsigned(best_extruder))) {
+                best_extruder = int(extruder_id);
+                best_ready_count = ready_count;
+                best_future_count = future_count;
+            }
+        }
+        return best_extruder;
+    };
+
+    std::vector<LocalZWipeTowerToolchange> toolchanges;
+    int                                    active_extruder = start_extruder;
+    size_t                                 completed_passes = 0;
+    while (completed_passes < pass_states.size()) {
+        const int chosen_extruder = choose_ready_extruder(active_extruder);
+        if (chosen_extruder < 0) {
+            BOOST_LOG_TRIVIAL(warning) << "Local-Z wipe tower dependency scheduler deadlocked, falling back"
+                                       << " start_extruder=" << start_extruder
+                                       << " pass_count=" << pass_refs.size();
+            return collect_toolchanges_legacy(start_extruder);
+        }
+
+        if (active_extruder >= 0 && active_extruder != chosen_extruder)
+            toolchanges.push_back(LocalZWipeTowerToolchange{unsigned(active_extruder), unsigned(chosen_extruder)});
+        active_extruder = chosen_extruder;
+
+        bool                completed_any = false;
+        std::vector<size_t> newly_completed;
+        for (size_t pass_state_idx = 0; pass_state_idx < pass_states.size(); ++pass_state_idx) {
+            PassState &pass_state = pass_states[pass_state_idx];
+            if (!pass_state.ready || pass_state.completed)
+                continue;
+
+            auto it_extruder = std::find(pass_state.remaining_extruders.begin(),
+                                         pass_state.remaining_extruders.end(),
+                                         unsigned(chosen_extruder));
+            if (it_extruder == pass_state.remaining_extruders.end())
+                continue;
+
+            pass_state.remaining_extruders.erase(it_extruder);
+            completed_any = true;
+            if (pass_state.remaining_extruders.empty())
+                newly_completed.push_back(pass_state_idx);
+        }
+
+        if (!completed_any) {
+            BOOST_LOG_TRIVIAL(warning) << "Local-Z wipe tower dependency scheduler made no progress, falling back"
+                                       << " start_extruder=" << start_extruder
+                                       << " active_extruder=" << active_extruder
+                                       << " chosen_extruder=" << chosen_extruder
+                                       << " pass_count=" << pass_refs.size();
+            return collect_toolchanges_legacy(start_extruder);
+        }
+
+        for (size_t pass_state_idx : newly_completed) {
+            PassState &pass_state = pass_states[pass_state_idx];
+            if (pass_state.completed)
+                continue;
+
+            pass_state.ready = false;
+            pass_state.completed = true;
+            ++completed_passes;
+
+            const std::vector<size_t> &chain = chains[pass_state.chain_idx];
+            const size_t next_chain_pos = pass_state.chain_pos + 1;
+            if (next_chain_pos < chain.size())
+                pass_states[chain[next_chain_pos]].ready = true;
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "Local-Z wipe tower dependency scheduler"
+                            << " start_extruder=" << start_extruder
+                            << " pass_count=" << pass_refs.size()
+                            << " chain_count=" << chains.size()
+                            << " toolchanges=" << toolchanges.size();
+    return toolchanges;
+}
+
+} // namespace
+
 //BBS
 // ORCA: Now this is a parameter
 //float Print::min_skirt_length = 0;
+
+struct FilamentType {
+    std::string name;
+    int min_temp;
+    int max_temp;
+    std::string temp_type;
+};
 
 void Print::clear()
 {
@@ -66,6 +560,18 @@ void Print::clear()
 	m_objects.clear();
     m_print_regions.clear();
     m_model.clear_objects();
+    m_statistics_by_extruder_count.clear();
+}
+
+bool Print::has_tpu_filament() const
+{
+    for (unsigned int filament_id : m_wipe_tower_data.tool_ordering.all_extruders()) {
+        std::string filament_name = m_config.filament_type.get_at(filament_id);
+        if (filament_name == "TPU") {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Called by Print::apply().
@@ -112,11 +618,13 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "fan_cooling_layer_time",
         "full_fan_speed_layer",
         "fan_kickstart",
+        "part_cooling_fan_min_pwm",
         "fan_speedup_overhangs",
         "fan_speedup_time",
         "filament_colour",
         "default_filament_colour",
         "filament_diameter",
+         "volumetric_speed_coefficients",
         "filament_density",
         "filament_cost",
         "filament_notes",
@@ -138,6 +646,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "gcode_add_line_number",
         "layer_change_gcode",
         "time_lapse_gcode",
+        "wrapping_detection_gcode",
         "fan_min_speed",
         "fan_max_speed",
         "printable_height",
@@ -150,7 +659,6 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "retraction_minimum_travel",
         "retract_before_wipe",
         "retract_when_changing_layer",
-        "retract_on_top_layer",
         "retraction_length",
         "retract_length_toolchange",
         "z_hop",
@@ -180,6 +688,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "is_infill_first",
         // Orca
         "chamber_temperature",
+        "chamber_minimal_temperature",
         "thumbnails",
         "thumbnails_format",
         "seam_gap",
@@ -194,8 +703,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "exclude_object",
         "support_material_interface_fan_speed",
         "internal_bridge_fan_speed", // ORCA: Add support for separate internal bridge fan speed control
+        "ironing_fan_speed",
         "single_extruder_multi_material_priming",
         "activate_air_filtration",
+        "activate_air_filtration_during_print",
+        "activate_air_filtration_on_completion",
         "during_print_exhaust_fan_speed",
         "complete_print_exhaust_fan_speed",
         "activate_chamber_temp_control",
@@ -206,7 +718,13 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "long_retractions_when_cut",
         "retraction_distances_when_cut",
         "filament_long_retractions_when_cut",
-        "filament_retraction_distances_when_cut"
+        "filament_retraction_distances_when_cut",
+        "grab_length",
+        "bed_temperature_formula",
+        "filament_notes",
+        "process_notes",
+        "printer_notes",
+        "use_3mf"
     };
 
     static std::unordered_set<std::string> steps_ignore;
@@ -244,6 +762,23 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "filament_shrinkage_compensation_z"
             || opt_key == "resolution"
             || opt_key == "precise_z_height"
+            // Mixed-filament and dithering keys require full reslicing so virtual
+            // filament assignments are re-evaluated and layer z-plans recomputed.
+            || opt_key == "dithering_z_step_size"
+            || opt_key == "dithering_local_z_mode"
+            || opt_key == "dithering_local_z_whole_objects"
+            || opt_key == "dithering_local_z_direct_multicolor"
+            || opt_key == "dithering_step_painted_zones_only"
+            || opt_key == "mixed_filament_gradient_mode"
+            || opt_key == "mixed_color_layer_height_a"
+            || opt_key == "mixed_color_layer_height_b"
+            || opt_key == "mixed_filament_height_lower_bound"
+            || opt_key == "mixed_filament_height_upper_bound"
+            || opt_key == "mixed_filament_advanced_dithering"
+            || opt_key == "mixed_filament_component_bias_enabled"
+            || opt_key == "mixed_filament_surface_indentation"
+            || opt_key == "mixed_filament_region_collapse"
+            || opt_key == "mixed_filament_definitions"
             // Spiral Vase forces different kind of slicing than the normal model:
             // In Spiral Vase mode, holes are closed and only the largest area contour is kept at each layer.
             // Therefore toggling the Spiral Vase on / off requires complete reslicing.
@@ -256,6 +791,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "nozzle_temperature_initial_layer"
             || opt_key == "filament_minimal_purge_on_wipe_tower"
             || opt_key == "filament_max_volumetric_speed"
+            || opt_key == "filament_adaptive_volumetric_speed"
             || opt_key == "filament_loading_speed"
             || opt_key == "filament_loading_speed_start"
             || opt_key == "filament_unloading_speed"
@@ -282,11 +818,26 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "hot_plate_temp"
             || opt_key == "textured_plate_temp"
             || opt_key == "enable_prime_tower"
+            || opt_key == "enable_wrapping_detection"
+            || opt_key == "prime_tower_enable_framework"
             || opt_key == "prime_tower_width"
             || opt_key == "prime_tower_brim_width"
+            || opt_key == "wipe_tower_type"
+            || opt_key == "prime_tower_skip_points"
+            || opt_key == "prime_tower_flat_ironing"
+            || opt_key == "enable_tower_interface_features"
             || opt_key == "first_layer_print_sequence"
             || opt_key == "other_layers_print_sequence"
             || opt_key == "other_layers_print_sequence_nums" 
+            || opt_key == "extruder_ams_count"
+            || opt_key == "filament_map_mode"
+            || opt_key == "filament_map"
+            || opt_key == "filament_adhesiveness_category"
+            || opt_key == "filament_tower_interface_pre_extrusion_dist"
+            || opt_key == "filament_tower_interface_pre_extrusion_length"
+            || opt_key == "filament_tower_ironing_area"
+            || opt_key == "filament_tower_interface_purge_volume"
+            || opt_key == "filament_tower_interface_print_temp"
             || opt_key == "wipe_tower_bridging"
             || opt_key == "wipe_tower_extra_flow"
             || opt_key == "wipe_tower_no_sparse_layers"
@@ -299,14 +850,21 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "travel_speed_z"
             || opt_key == "initial_layer_speed"
             || opt_key == "initial_layer_travel_speed"
+            || opt_key == "initial_layer_travel_acceleration"
+            || opt_key == "initial_layer_travel_jerk"
             || opt_key == "slow_down_layers"
             || opt_key == "idle_temperature"
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"
+            || opt_key == "wipe_tower_wall_type"
+            || opt_key == "wipe_tower_extra_rib_length"
+            || opt_key == "wipe_tower_rib_width"
+            || opt_key == "wipe_tower_fillet_wall"
             || opt_key == "wipe_tower_filament"
             || opt_key == "wiping_volumes_extruders"
             || opt_key == "enable_filament_ramming"
+            || opt_key == "tool_change_on_wipe_tower"
             || opt_key == "purge_in_prime_tower"
             || opt_key == "z_offset"
             || opt_key == "support_multi_bed_types"
@@ -315,6 +873,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             steps.emplace_back(psSkirtBrim);
         } else if (opt_key == "filament_soluble"
                 || opt_key == "filament_is_support"
+                || opt_key == "filament_printable"
+                || opt_key == "filament_change_length"
                 || opt_key == "independent_support_layer_height") {
             steps.emplace_back(psWipeTower);
             // Soluble support interface / non-soluble base interface produces non-soluble interface layers below soluble interface layers.
@@ -393,6 +953,13 @@ std::vector<unsigned int> Print::object_extruders() const
 {
     std::vector<unsigned int> extruders;
     extruders.reserve(m_print_regions.size() * m_objects.size() * 3);
+    const size_t num_physical = m_config.filament_diameter.size();
+
+    auto append_physical_extruders = [this, num_physical, &extruders](unsigned int filament_id) {
+        const std::vector<unsigned int> physical_extruders =
+            m_mixed_filament_mgr.physical_extruder_indices_for_filament(filament_id, num_physical);
+        extruders.insert(extruders.end(), physical_extruders.begin(), physical_extruders.end());
+    };
 
     //Orca: Collect extruders from all regions.
     for (const PrintObject *object : m_objects)
@@ -405,7 +972,8 @@ std::vector<unsigned int> Print::object_extruders() const
             std::vector<int> volume_extruders = mv->get_extruders();
             for (int extruder : volume_extruders) {
                 assert(extruder > 0);
-                extruders.push_back(extruder - 1);
+                if (extruder > 0)
+                    append_physical_extruders(unsigned(extruder));
             }
         }
 
@@ -417,7 +985,7 @@ std::vector<unsigned int> Print::object_extruders() const
                 //Add protection here to avoid overflow
                 auto value = layer_range.second.option("extruder")->getInt();
                 if (value > 0)
-                    extruders.push_back(value - 1);
+                    append_physical_extruders(unsigned(value));
             }
         }
     }
@@ -431,23 +999,25 @@ std::vector<unsigned int> Print::support_material_extruders() const
     std::vector<unsigned int> extruders;
     bool support_uses_current_extruder = false;
     // BBS
-    auto num_extruders = (unsigned int)m_config.filament_diameter.size();
+    const size_t num_physical = m_config.filament_diameter.size();
 
     for (PrintObject *object : m_objects) {
         if (object->has_support_material()) {
-        	assert(object->config().support_filament >= 0);
+            assert(object->config().support_filament.value >= 0);
             if (object->config().support_filament == 0)
                 support_uses_current_extruder = true;
             else {
-            	unsigned int i = (unsigned int)object->config().support_filament - 1;
-                extruders.emplace_back((i >= num_extruders) ? 0 : i);
+                const std::vector<unsigned int> physical_extruders =
+                    m_mixed_filament_mgr.physical_extruder_indices_for_filament(unsigned(object->config().support_filament.value), num_physical);
+                extruders.insert(extruders.end(), physical_extruders.begin(), physical_extruders.end());
             }
-        	assert(object->config().support_interface_filament >= 0);
+            assert(object->config().support_interface_filament.value >= 0);
             if (object->config().support_interface_filament == 0)
                 support_uses_current_extruder = true;
             else {
-            	unsigned int i = (unsigned int)object->config().support_interface_filament - 1;
-                extruders.emplace_back((i >= num_extruders) ? 0 : i);
+                const std::vector<unsigned int> physical_extruders =
+                    m_mixed_filament_mgr.physical_extruder_indices_for_filament(unsigned(object->config().support_interface_filament.value), num_physical);
+                extruders.insert(extruders.end(), physical_extruders.begin(), physical_extruders.end());
             }
         }
     }
@@ -468,13 +1038,23 @@ std::vector<unsigned int> Print::extruders(bool conside_custom_gcode) const
 
     if (conside_custom_gcode) {
         //BBS
-        int num_extruders = m_config.filament_colour.size();
+        const size_t num_physical  = m_config.filament_diameter.size();
+        const size_t num_filaments = m_mixed_filament_mgr.total_filaments(num_physical);
         if (m_model.plates_custom_gcodes.find(m_model.curr_plate_index) != m_model.plates_custom_gcodes.end()) {
             for (auto item : m_model.plates_custom_gcodes.at(m_model.curr_plate_index).gcodes) {
-                if (item.type == CustomGCode::Type::ToolChange && item.extruder <= num_extruders)
-                    extruders.push_back((unsigned int)(item.extruder - 1));
+                if (item.type == CustomGCode::Type::ToolChange && item.extruder >= 1 && item.extruder <= int(num_filaments)) {
+                    const std::vector<unsigned int> physical_extruders =
+                        m_mixed_filament_mgr.physical_extruder_indices_for_filament(unsigned(item.extruder), num_physical);
+                    extruders.insert(extruders.end(), physical_extruders.begin(), physical_extruders.end());
+                }
             }
         }
+    }
+
+    // If a wipe tower filament is explicitly set, ensure it participates in tool ordering.
+    if (has_wipe_tower() && config().wipe_tower_filament != 0 && extruders.size() > 1) {
+        assert(config().wipe_tower_filament > 0 && config().wipe_tower_filament < int(config().nozzle_diameter.size()));
+        extruders.emplace_back(config().wipe_tower_filament - 1); // config value is 1-based
     }
 
     sort_remove_duplicates(extruders);
@@ -526,7 +1106,7 @@ bool Print::has_brim() const
 }
 
 //BBS
-std::vector<size_t> Print::layers_sorted_for_object(float start, float end, std::vector<LayerPtrs> &layers_of_objects, std::vector<BoundingBox> &boundingBox_for_objects, std::vector<Points> &objects_instances_shift)
+std::vector<size_t> Print::layers_sorted_for_object(float start, float end, std::vector<LayerPtrs> &layers_of_objects, std::vector<BoundingBox> &boundingBox_for_objects, VecOfPoints &objects_instances_shift)
 {
     std::vector<size_t> idx_of_object_sorted;
     size_t              idx = 0;
@@ -548,21 +1128,12 @@ std::vector<size_t> Print::layers_sorted_for_object(float start, float end, std:
 StringObjectException Print::sequential_print_clearance_valid(const Print &print, Polygons *polygons, std::vector<std::pair<Polygon, float>>* height_polygons)
 {
     StringObjectException single_object_exception;
-    auto print_config = print.config();
-    Pointfs excluse_area_points = print_config.bed_exclude_area.values;
-    Polygons exclude_polys;
-    Polygon exclude_poly;
+    const auto& print_config = print.config();
+    Polygons exclude_polys = get_bed_excluded_area(print_config);
     const Vec3d print_origin = print.get_plate_origin();
-    for (int i = 0; i < excluse_area_points.size(); i++) {
-        auto pt = excluse_area_points[i];
-        exclude_poly.points.emplace_back(scale_(pt.x() + print_origin.x()), scale_(pt.y() + print_origin.y()));
-        if (i % 4 == 3) {  // exclude areas are always rectangle
-            exclude_polys.push_back(exclude_poly);
-            exclude_poly.points.clear();
-        }
-    }
+    std::for_each(exclude_polys.begin(), exclude_polys.end(),
+                  [&print_origin](Polygon& p) { p.translate(scale_(print_origin.x()), scale_(print_origin.y())); });
 
-    std::map<ObjectID, Polygon> map_model_object_to_convex_hull;
     struct print_instance_info
     {
         const PrintInstance *print_instance;
@@ -597,27 +1168,13 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
         for (const PrintObject *print_object : print.objects()) {
             assert(! print_object->model_object()->instances.empty());
             assert(! print_object->instances().empty());
-            ObjectID model_object_id = print_object->model_object()->id();
-            auto it_convex_hull = map_model_object_to_convex_hull.find(model_object_id);
-            // Get convex hull of all printable volumes assigned to this print object.
-            ModelInstance *model_instance0 = print_object->model_object()->instances.front();
-            if (it_convex_hull == map_model_object_to_convex_hull.end()) {
-                // Calculate the convex hull of a printable object.
-                // Grow convex hull with the clearance margin.
-                // FIXME: Arrangement has different parameters for offsetting (jtMiter, limit 2)
-                // which causes that the warning will be showed after arrangement with the
-                // appropriate object distance. Even if I set this to jtMiter the warning still shows up.
-                it_convex_hull = map_model_object_to_convex_hull.emplace_hint(it_convex_hull, model_object_id,
-                            print_object->model_object()->convex_hull_2d(Geometry::assemble_transform(
-                            { 0.0, 0.0, model_instance0->get_offset().z() }, model_instance0->get_rotation(), model_instance0->get_scaling_factor(), model_instance0->get_mirror())));
-            }
-            // Make a copy, so it may be rotated for instances.
-            Polygon convex_hull0 = it_convex_hull->second;
-            const double z_diff = Geometry::rotation_diff_z(model_instance0->get_rotation(), print_object->instances().front().model_instance->get_rotation());
-            if (std::abs(z_diff) > EPSILON)
-                convex_hull0.rotate(z_diff);
+            
+            // Orca: check convex hull intersection for each instance individually to handle rotation/offset differences correctly
             // Now we check that no instance of convex_hull intersects any of the previously checked object instances.
             for (const PrintInstance &instance : print_object->instances()) {
+                Polygon convex_hull0 = print_object->model_object()->convex_hull_2d(Geometry::assemble_transform(
+                            { 0.0, 0.0, instance.model_instance->get_offset().z() }, instance.model_instance->get_rotation(), instance.model_instance->get_scaling_factor(), instance.model_instance->get_mirror()));
+
                 Polygon convex_hull_no_offset = convex_hull0, convex_hull;
                 auto tmp = offset(convex_hull_no_offset, obj_distance, jtRound, scale_(0.1));
                 if (!tmp.empty()) { // tmp may be empty due to clipper's bug, see STUDIO-2452
@@ -631,7 +1188,9 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 if (!intersection(exclude_polys, convex_hull_no_offset).empty()) {
                     if (single_object_exception.string.empty()) {
                         single_object_exception.string = (boost::format(L("%1% is too close to exclusion area, there may be collisions when printing.")) %instance.model_instance->get_object()->name).str();
-                        single_object_exception.object = instance.model_instance->get_object();
+                        // single_object_exception.object = instance.model_instance->get_object();
+                        //ORCA: Pass ModelInstance instead of ModelObject
+                        single_object_exception.object = instance.model_instance;
                     }
                     else {
                         single_object_exception.string += "\n"+(boost::format(L("%1% is too close to exclusion area, there may be collisions when printing.")) %instance.model_instance->get_object()->name).str();
@@ -648,12 +1207,16 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                         bool has_exception = false;
                         if (single_object_exception.string.empty()) {
                             single_object_exception.string = (boost::format(L("%1% is too close to others, and collisions may be caused.")) %instance.model_instance->get_object()->name).str();
-                            single_object_exception.object = instance.model_instance->get_object();
+                            // single_object_exception.object = instance.model_instance->get_object();
+                            //ORCA: Pass ModelInstance instead of ModelObject for better selection
+                            single_object_exception.object = instance.model_instance;
                             has_exception                  = true;
                         }
                         else {
                             single_object_exception.string += "\n"+(boost::format(L("%1% is too close to others, and collisions may be caused.")) %instance.model_instance->get_object()->name).str();
-                            single_object_exception.object = nullptr;
+                            // single_object_exception.object = nullptr; 
+                            // ORCA: Keep the first object so jump works
+                            // has_exception                  = true;
                             has_exception                  = true;
                         }
 
@@ -887,61 +1450,65 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     if (print_instances_ordered.size() < 1)
         return {};
 
-    auto print_config = print.config();
-    Pointfs excluse_area_points = print_config.bed_exclude_area.values;
-    Polygons exclude_polys;
-    Polygon exclude_poly;
+    const auto& print_config = print.config();
+    Polygons exclude_polys = get_bed_excluded_area(print_config);
     const Vec3d print_origin = print.get_plate_origin();
-    for (int i = 0; i < excluse_area_points.size(); i++) {
-        auto pt = excluse_area_points[i];
-        exclude_poly.points.emplace_back(scale_(pt.x() + print_origin.x()), scale_(pt.y() + print_origin.y()));
-        if (i % 4 == 3) {  // exclude areas are always rectangle
-            exclude_polys.push_back(exclude_poly);
-            exclude_poly.points.clear();
-        }
+    std::for_each(exclude_polys.begin(), exclude_polys.end(),
+                  [&print_origin](Polygon& p) { p.translate(scale_(print_origin.x()), scale_(print_origin.y())); });
+
+    Pointfs wrapping_detection_area = print_config.wrapping_exclude_area.values;
+    Polygon wrapping_poly;
+    for (size_t i = 0; i < wrapping_detection_area.size(); ++i) {
+        auto pt = wrapping_detection_area[i];
+        wrapping_poly.points.emplace_back(scale_(pt.x() + print_origin.x()), scale_(pt.y() + print_origin.y()));
     }
 
-    std::map<const PrintInstance*, Polygon> map_model_object_to_convex_hull;
-    // sequential_print_horizontal_clearance_valid
     Polygons convex_hulls_other;
-    for (int k = 0; k < print_instances_ordered.size(); k++)
-    {
-        auto& inst = print_instances_ordered[k];
-        auto it_convex_hull = map_model_object_to_convex_hull.find(inst);
-        // Get convex hull of all printable volumes assigned to this print object.
-        const ModelInstance* model_instance0 = inst->model_instance;
-        if (it_convex_hull == map_model_object_to_convex_hull.end()) {
-            // Calculate the convex hull of a printable object.
-            auto convex_hull0 = inst->print_object->model_object()->convex_hull_2d(
-                Geometry::assemble_transform(Vec3d::Zero(), model_instance0->get_rotation(), model_instance0->get_scaling_factor(), model_instance0->get_mirror()));
+    // Orca: check convex hull intersection for each instance individually
+    for (auto& inst : print_instances_ordered) {
+        Polygons current_instance_hulls;
+        for (const ModelVolume *v : inst->print_object->model_object()->volumes) {
+            if (!v->is_model_part()) continue;
+            
+            auto volume_hull = v->get_convex_hull_2d(Geometry::assemble_transform(Vec3d::Zero(), inst->model_instance->get_rotation(),
+                                                                                  inst->model_instance->get_scaling_factor(), inst->model_instance->get_mirror()));
+            volume_hull.translate(inst->shift - inst->print_object->center_offset());
 
-            double z_diff = Geometry::rotation_diff_z(model_instance0->get_rotation(), inst->model_instance->get_rotation());
-            if (std::abs(z_diff) > EPSILON)
-                convex_hull0.rotate(z_diff);
+            if (!intersection(exclude_polys, volume_hull).empty()) {
+                // return {inst->model_instance->get_object()->name + L(" is too close to exclusion area, there may be collisions when printing.") + "\n",
+                //        inst->model_instance->get_object()};
+                //ORCA: Pass ModelInstance instead of ModelObject
+                return {inst->model_instance->get_object()->name + L(" is too close to exclusion area, there may be collisions when printing.") + "\n",
+                        inst->model_instance};
+            }
 
-            // instance.shift is a position of a centered object, while model object may not be centered.
-            // Conver the shift from the PrintObject's coordinates into ModelObject's coordinates by removing the centering offset.
-            convex_hull0.translate(inst->shift - inst->print_object->center_offset());
-
-            it_convex_hull = map_model_object_to_convex_hull.emplace_hint(it_convex_hull, inst, convex_hull0);
+            if (print_config.enable_wrapping_detection.value && !intersection(wrapping_poly, volume_hull).empty()) {
+                // return {inst->model_instance->get_object()->name + L(" is too close to clumping detection area, there may be collisions when printing.") + "\n",
+                //        inst->model_instance->get_object()};
+                //ORCA: Pass ModelInstance instead of ModelObject
+                return {inst->model_instance->get_object()->name + L(" is too close to clumping detection area, there may be collisions when printing.") + "\n",
+                        inst->model_instance};
+            }
+            current_instance_hulls.emplace_back(volume_hull);
         }
-        Polygon& convex_hull = it_convex_hull->second;
-        Polygons convex_hulls_temp;
-        convex_hulls_temp.push_back(convex_hull);
-        if (!intersection(convex_hulls_other, convex_hulls_temp).empty()) {
+
+        if (!intersection(convex_hulls_other, current_instance_hulls).empty()) {
             if (warning) {
-                warning->string = inst->model_instance->get_object()->name + L(" is too close to others, there may be collisions when printing.") + "\n";
-                warning->object = inst->model_instance->get_object();
+                if (warning->string.empty()) {
+                    warning->string = (boost::format(L("%1% is too close to others, and collisions may be caused.")) % inst->model_instance->get_object()->name).str();
+                    // warning->object = inst->model_instance->get_object();
+                    //ORCA: Pass ModelInstance instead of ModelObject for better selection
+                    warning->object = inst->model_instance;
+                } else {
+                    warning->string += "\n" + (boost::format(L("%1% is too close to others, and collisions may be caused.")) % inst->model_instance->get_object()->name).str();
+                    // ORCA: Keep the first object so jump works
+                    if (!warning->object) warning->object = inst->model_instance;
+                }
+                warning->is_warning = true;
+                warning->type = STRING_EXCEPT_OBJECT_COLLISION_IN_LAYER_PRINT;
             }
         }
-        if (!intersection(exclude_polys, convex_hull).empty()) {
-            return {inst->model_instance->get_object()->name + L(" is too close to exclusion area, there may be collisions when printing.") + "\n", inst->model_instance->get_object()};
-            /*if (warning) {
-                warning->string = inst->model_instance->get_object()->name + L(" is too close to exclusion area, there may be collisions when printing.") + "\n";
-                warning->object = inst->model_instance->get_object();
-            }*/
-        }
-        convex_hulls_other.emplace_back(convex_hull);
+        append(convex_hulls_other, current_instance_hulls);
     }
 
     //BBS: add the wipe tower check logic
@@ -958,15 +1525,27 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     float        depth                     = print.wipe_tower_data(filaments_count).depth;
     //float        brim_width                = print.wipe_tower_data(filaments_count).brim_width;
 
+    if (config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib)
+        width = depth;
+
     Polygons convex_hulls_temp;
     if (print.has_wipe_tower()) {
-        Polygon wipe_tower_convex_hull;
-        wipe_tower_convex_hull.points.emplace_back(scale_(x), scale_(y));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x + width), scale_(y));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x + width), scale_(y + depth));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x), scale_(y + depth));
-        wipe_tower_convex_hull.rotate(a);
-        convex_hulls_temp.push_back(wipe_tower_convex_hull);
+        if (!print.is_step_done(psWipeTower)) {
+            Polygon wipe_tower_convex_hull;
+            wipe_tower_convex_hull.points.emplace_back(scale_(x), scale_(y));
+            wipe_tower_convex_hull.points.emplace_back(scale_(x + width), scale_(y));
+            wipe_tower_convex_hull.points.emplace_back(scale_(x + width), scale_(y + depth));
+            wipe_tower_convex_hull.points.emplace_back(scale_(x), scale_(y + depth));
+            wipe_tower_convex_hull.rotate(a);
+            convex_hulls_temp.push_back(wipe_tower_convex_hull);
+        } else {
+            //here, wipe_tower_polygon is not always convex.
+            Polygon wipe_tower_polygon;
+            if (print.wipe_tower_data().wipe_tower_mesh_data)
+                wipe_tower_polygon = print.wipe_tower_data().wipe_tower_mesh_data->bottom;
+            wipe_tower_polygon.translate(Point(scale_(x), scale_(y)));
+            convex_hulls_temp.push_back(wipe_tower_polygon);
+        }
     }
     if (!intersection(convex_hulls_other, convex_hulls_temp).empty()) {
         if (warning) {
@@ -979,26 +1558,67 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
         }*/
         return {L("Prime Tower") + L(" is too close to exclusion area, and collisions will be caused.\n")};
     }
-
+    if (print_config.enable_wrapping_detection.value && !intersection({wrapping_poly}, convex_hulls_temp).empty()) {
+        return {L("Prime Tower") + L(" is too close to clumping detection area, and collisions will be caused.\n")};
+    }
     return {};
 }
 
-bool Print::check_multi_filaments_compatibility(const std::vector<std::string>& filament_types)
+FilamentCompatibilityType Print::check_multi_filaments_compatibility(
+    const std::vector<std::string>& filament_types,
+    const std::vector<int>& nozzle_temperatures,
+    const std::vector<int>& nozzle_temperature_range_lows,
+    const std::vector<int>& nozzle_temperature_range_highs)
 {
-    bool has_high_temperature_filament = false;
-    bool has_low_temperature_filament = false;
+    const size_t filament_count = filament_types.size();
+    if (filament_count < 2)
+        return FilamentCompatibilityType::Compatible;
 
-    for (const auto& type : filament_types) {
-        if (get_filament_temp_type(type) ==FilamentTempType::HighTemp)
-            has_high_temperature_filament = true;
-        else if (get_filament_temp_type(type) == FilamentTempType::LowTemp)
-            has_low_temperature_filament = true;
+    std::vector<int> resolved_temperatures(filament_count, 0);
+    std::vector<int> resolved_range_lows(filament_count, 0);
+    std::vector<int> resolved_range_highs(filament_count, 0);
+    for (size_t i = 0; i < filament_count; ++i) {
+        int range_low = (i < nozzle_temperature_range_lows.size()) ? nozzle_temperature_range_lows[i] : 0;
+        int range_high = (i < nozzle_temperature_range_highs.size()) ? nozzle_temperature_range_highs[i] : 0;
+
+        if (range_low == 0 || range_high == 0) {
+            int default_low = range_low;
+            int default_high = range_high;
+            MaterialType::get_temperature_range(filament_types[i], default_low, default_high);
+            if (range_low == 0)
+                range_low = default_low;
+            if (range_high == 0)
+                range_high = default_high;
+        }
+
+        if (range_low >= range_high)
+            return FilamentCompatibilityType::InvalidTemperatureRange;
+
+        int print_temperature = (i < nozzle_temperatures.size()) ? nozzle_temperatures[i] : 0;
+
+        resolved_temperatures[i] = print_temperature;
+        resolved_range_lows[i] = range_low;
+        resolved_range_highs[i] = range_high;
     }
 
-    if (has_high_temperature_filament && has_low_temperature_filament)
-        return false;
+    for (size_t i = 0; i < filament_count; ++i) {
+        for (size_t j = i + 1; j < filament_count; ++j) {
+            const bool i_temp_is_compatible_with_j =
+                resolved_temperatures[i] >= resolved_range_lows[j] &&
+                resolved_temperatures[i] <= resolved_range_highs[j];
+            const bool j_temp_is_compatible_with_i =
+                resolved_temperatures[j] >= resolved_range_lows[i] &&
+                resolved_temperatures[j] <= resolved_range_highs[i];
 
-    return true;
+            if (i_temp_is_compatible_with_j && j_temp_is_compatible_with_i)
+                continue;
+
+            // Range-only rule: any pair outside mutual recommended ranges is incompatible.
+            return FilamentCompatibilityType::HighLowMixed;
+        }
+    }
+
+    return FilamentCompatibilityType::Compatible;
 }
 
 bool Print::is_filaments_compatible(const std::vector<int>& filament_types)
@@ -1043,25 +1663,117 @@ int Print::get_compatible_filament_type(const std::set<int>& filament_types)
 StringObjectException Print::check_multi_filament_valid(const Print& print)
 {
     auto print_config = print.config();
+    const std::string incompatible_temp_msg = L("Selected nozzle temperatures are incompatible. Each filament's nozzle temperature must fall within the recommended nozzle temperature range of the other filaments. Otherwise, nozzle clogging or printer damage may occur.");
+    const std::string invalid_temp_range_msg = L("Invalid recommended nozzle temperature range. The lower bound must be lower than the upper bound.");
+    const std::string incompatible_temp_msg_preferences_enable = L("If you still want to print, you can enable the option in Preferences / Control / Slicing / Remove mixed temperature restriction.");
+    if(print_config.print_sequence == PrintSequence::ByObject) {// use ByObject valid under ByObject print sequence
+        bool has_incompatible_object = false;
+        bool enable_mix_printing = !print.need_check_multi_filaments_compatibility();
+        StringObjectException ret;
+
+        for (const auto &objectID_t : print.print_object_ids()) {
+            std::set<int> obj_used_extruder_ids;
+            auto                     print_object = print.get_object(objectID_t);// current object
+            if (print_object){
+                auto object_extruders_t = print_object->object_extruders(); // object used extruder
+                for (unsigned int extruder : object_extruders_t) {
+                    obj_used_extruder_ids.insert(static_cast<int>(extruder));
+                }
+            }
+
+            if (print_object->has_support_material()) { // extruder used by supports
+                auto num_extruders                 = (unsigned int) print_config.filament_diameter.size();
+                assert(print_object->config().support_filament >= 0);
+                if (print_object->config().support_filament >= 1 && (unsigned int)print_object->config().support_filament < num_extruders + 1)
+                    obj_used_extruder_ids.insert((unsigned int) print_object->config().support_filament - 1);//0-based extruder id
+                assert(print_object->config().support_interface_filament >= 0);
+                if (print_object->config().support_interface_filament >= 1 && (unsigned int)print_object->config().support_interface_filament < num_extruders + 1)
+                    obj_used_extruder_ids.insert((unsigned int) print_object->config().support_interface_filament - 1);
+            }
+            std::vector<std::string> filament_types;
+            std::vector<int> nozzle_temperatures;
+            std::vector<int> nozzle_temperature_range_lows;
+            std::vector<int> nozzle_temperature_range_highs;
+            filament_types.reserve(obj_used_extruder_ids.size());
+            nozzle_temperatures.reserve(obj_used_extruder_ids.size());
+            nozzle_temperature_range_lows.reserve(obj_used_extruder_ids.size());
+            nozzle_temperature_range_highs.reserve(obj_used_extruder_ids.size());
+
+            for (const auto &extruder_idx : obj_used_extruder_ids) {
+                filament_types.push_back(print_config.filament_type.get_at(extruder_idx));
+                nozzle_temperatures.push_back(print_config.nozzle_temperature.get_at(extruder_idx));
+                nozzle_temperature_range_lows.push_back(print_config.nozzle_temperature_range_low.get_at(extruder_idx));
+                nozzle_temperature_range_highs.push_back(print_config.nozzle_temperature_range_high.get_at(extruder_idx));
+            }
+
+            auto compatibility = check_multi_filaments_compatibility(
+                filament_types,
+                nozzle_temperatures,
+                nozzle_temperature_range_lows,
+                nozzle_temperature_range_highs); // check for each object
+            if (compatibility == FilamentCompatibilityType::InvalidTemperatureRange) {
+                ret.string = invalid_temp_range_msg;
+                return ret;
+            }
+            if (compatibility != FilamentCompatibilityType::Compatible) {
+                has_incompatible_object = true;
+                break;
+            }
+        }
+        if (has_incompatible_object){
+            if (enable_mix_printing) {
+                ret.string     = incompatible_temp_msg;
+                ret.is_warning = true;
+            } else
+                ret.string = incompatible_temp_msg + " " + incompatible_temp_msg_preferences_enable;
+        }
+        return ret;
+    }
     std::vector<unsigned int> extruders = print.extruders();
     std::vector<std::string> filament_types;
+    std::vector<int> nozzle_temperatures;
+    std::vector<int> nozzle_temperature_range_lows;
+    std::vector<int> nozzle_temperature_range_highs;
     filament_types.reserve(extruders.size());
-
-    for (const auto& extruder_idx : extruders)
+    nozzle_temperatures.reserve(extruders.size());
+    nozzle_temperature_range_lows.reserve(extruders.size());
+    nozzle_temperature_range_highs.reserve(extruders.size());
+    for (const auto& extruder_idx : extruders) {
         filament_types.push_back(print_config.filament_type.get_at(extruder_idx));
+        nozzle_temperatures.push_back(print_config.nozzle_temperature.get_at(extruder_idx));
+        nozzle_temperature_range_lows.push_back(print_config.nozzle_temperature_range_low.get_at(extruder_idx));
+        nozzle_temperature_range_highs.push_back(print_config.nozzle_temperature_range_high.get_at(extruder_idx));
+    }
 
-    if (!check_multi_filaments_compatibility(filament_types))
-        return { L("Can not print multiple filaments which have large difference of temperature together. Otherwise, the extruder and nozzle may be blocked or damaged during printing") };
+    auto compatibility = check_multi_filaments_compatibility(
+        filament_types,
+        nozzle_temperatures,
+        nozzle_temperature_range_lows,
+        nozzle_temperature_range_highs);
+    bool enable_mix_printing = !print.need_check_multi_filaments_compatibility();
 
-    return {std::string()};
+    StringObjectException ret;
+
+    if (compatibility == FilamentCompatibilityType::InvalidTemperatureRange) {
+        ret.string = invalid_temp_range_msg;
+        return ret;
+    }
+
+    if(compatibility != FilamentCompatibilityType::Compatible){
+        if(enable_mix_printing){
+            ret.string = incompatible_temp_msg;
+            ret.is_warning = true;
+        }
+        else{
+            ret.string = incompatible_temp_msg + " " + incompatible_temp_msg_preferences_enable;
+        }
+    }
+
+    return ret;
 }
 
-// Orca: this g92e0 regex is used copied from PrusaSlicer
-// Matches "G92 E0" with various forms of writing the zero and with an optional comment.
-boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$" };
-
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
-//BBS: refine seq-print validation logic
+//BBS: refine seq-print validation logic.....FIXME:StringObjectException *warning can only contain one warning, but there might be many warnings, need a vector<StringObjectException>
 StringObjectException Print::validate(StringObjectException *warning, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     std::vector<unsigned int> extruders = this->extruders();
@@ -1073,18 +1785,29 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
-    if (nozzles < 2 && extruders.size() > 1 && m_config.print_sequence != PrintSequence::ByObject) {
+    if (nozzles < 2 && extruders.size() > 1) {
         auto ret = check_multi_filament_valid(*this);
         if (!ret.string.empty())
         {
             ret.type = STRING_EXCEPT_FILAMENTS_DIFFERENT_TEMP;
-            return ret;
+            if (ret.is_warning && warning != nullptr) {
+                *warning = ret;
+                //return {};
+            }else
+                return ret;
         }
     }
 
-    if (m_config.print_sequence == PrintSequence::ByObject) {
+    if (m_config.print_sequence == PrintSequence::ByObject && (m_objects.size() > 1 || m_objects[0]->instances().size() > 1)) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};
+
+        if (m_config.enable_wrapping_detection) {
+            StringObjectException clumping_detection_setting_err;
+            clumping_detection_setting_err.string = L("Clumping detection is not supported when \"by object\" sequence is enabled.");
+            clumping_detection_setting_err.opt_key = "enable_wrapping_detection";
+            return clumping_detection_setting_err;
+        }
 
         //BBS: refine seq-print validation logic
         auto ret = sequential_print_clearance_valid(*this, collison_polygons, height_polygons);
@@ -1102,6 +1825,27 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         }
     }
 
+    if (m_config.enable_prime_tower) {
+        for (const PrintObject* object : m_objects) {
+            if (object->config().precise_z_height.value && warning != nullptr) {
+                StringObjectException warningtemp;
+                warningtemp.string     = L("Enabling both precise Z height and the prime tower may cause slicing errors.");
+                warningtemp.opt_key    = "precise_z_height";
+                warningtemp.is_warning = true;
+                *warning               = warningtemp;
+                break;
+            }
+        }
+    } else {
+        if (m_config.enable_wrapping_detection && warning!=nullptr) {
+            StringObjectException warningtemp;
+            warningtemp.string     = L("A prime tower is required for clumping detection; otherwise, there may be flaws on the model.");
+            warningtemp.opt_key    = "enable_prime_tower";
+            warningtemp.is_warning = true;
+            *warning               = warningtemp;
+        }
+    }
+
     if (m_config.spiral_mode) {
         size_t total_copies_count = 0;
         for (const PrintObject* object : m_objects)
@@ -1110,8 +1854,15 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         if (total_copies_count > 1 && m_config.print_sequence != PrintSequence::ByObject)
             return {L("Please select \"By object\" print sequence to print multiple objects in spiral vase mode."), nullptr, "spiral_mode"};
         assert(m_objects.size() == 1);
-        if (m_objects.front()->all_regions().size() > 1)
-            return {L("The spiral vase mode does not work when an object contains more than one materials."), nullptr, "spiral_mode"};
+        const auto all_regions = m_objects.front()->all_regions();
+        if (all_regions.size() > 1) {
+            // Orca: make sure regions are not compatible
+            if (std::any_of(all_regions.begin() + 1, all_regions.end(), [ra = all_regions.front()](const auto rb) {
+                return !Layer::is_perimeter_compatible(ra, rb);
+            })) {
+                return {L("The spiral vase mode does not work when an object contains more than one materials."), nullptr, "spiral_mode"};
+            }
+        }
     }
 
     // Cache of layer height profiles for checking:
@@ -1125,7 +1876,7 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             layer_height_profiles.assign(m_objects.size(), std::vector<coordf_t>());
         std::vector<coordf_t>   &profile      = layer_height_profiles[print_object_idx];
         if (profile.empty())
-            PrintObject::update_layer_height_profile(*print_object.model_object(), print_object.slicing_parameters(), profile);
+            PrintObject::update_layer_height_profile(*print_object.model_object(), print_object.slicing_parameters(), profile, &print_object);
         return profile;
     };
 
@@ -1221,7 +1972,7 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
             double gap_layers = slicing_params.gap_object_support / slicing_params.layer_height;
             if (gap_layers - (int)gap_layers > EPSILON) {
-                return  { L("The prime tower requires \"support gap\" to be multiple of layer height"), object };
+                return {L("The prime tower requires \"support gap\" to be multiple of layer height."), object};
             }
         }
 #endif
@@ -1234,14 +1985,14 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 const SlicingParameters &slicing_params = object->slicing_parameters();
                 if (std::abs(slicing_params.first_print_layer_height - slicing_params0.first_print_layer_height) > EPSILON ||
                     std::abs(slicing_params.layer_height             - slicing_params0.layer_height            ) > EPSILON)
-                    return {L("The prime tower requires that all objects have the same layer heights"), object, "initial_layer_print_height"};
+                    return {L("The prime tower requires that all objects have the same layer heights."), object, "initial_layer_print_height"};
                 if (slicing_params.raft_layers() != slicing_params0.raft_layers())
-                    return {L("The prime tower requires that all objects are printed over the same number of raft layers"), object, "raft_layers"};
+                    return {L("The prime tower requires that all objects are printed over the same number of raft layers."), object, "raft_layers"};
                 // BBS: support gap can be multiple of object layer height, remove _L()
 #if 0
                 if (slicing_params0.gap_object_support != slicing_params.gap_object_support ||
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
-                    return  {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance"), object};
+                    return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
                 if (!equal_layering(slicing_params, slicing_params0))
                     return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
@@ -1276,7 +2027,7 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                         //if (i % 2 == 0 && layer_height_profiles[tallest_object_idx][i] > layer_height_profiles[idx_object][layer_height_profiles[idx_object].size() - 2])
                         //    break;
                         if (std::abs(layer_height_profiles[idx_object][i] - layer_height_profiles[tallest_object_idx][i]) > eps)
-                            return {L("The prime tower is only supported if all objects have the same variable layer height")};
+                            return {L("The prime tower is only supported if all objects have the same variable layer height.")};
                         ++i;
                     }
                 }
@@ -1307,12 +2058,12 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         auto validate_extrusion_width = [min_nozzle_diameter, max_nozzle_diameter](const ConfigBase &config, const char *opt_key, double layer_height, std::string &err_msg) -> bool {
             double extrusion_width_min = config.get_abs_value(opt_key, min_nozzle_diameter);
             double extrusion_width_max = config.get_abs_value(opt_key, max_nozzle_diameter);
-        	if (extrusion_width_min == 0) {
-        		// Default "auto-generated" extrusion width is always valid.
-        	} else if (extrusion_width_min <= layer_height) {
-                err_msg = L("Too small line width");
-				return false;
-			} else if (extrusion_width_max > max_nozzle_diameter * 5) {
+            if (extrusion_width_min == 0) {
+                // Default "auto-generated" extrusion width is always valid.
+            } else if (extrusion_width_min <= layer_height) {
+                    err_msg = L("Too small line width");
+                    return false;
+                } else if (extrusion_width_max > max_nozzle_diameter * MAX_LINE_WIDTH_MULTIPLIER) {
                 err_msg = L("Too large line width");
 				return false;
 			}
@@ -1341,18 +2092,46 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
                 // Prusa: Fixing crashes with invalid tip diameter or branch diameter
                 // https://github.com/prusa3d/PrusaSlicer/commit/96b3ae85013ac363cd1c3e98ec6b7938aeacf46d
-                if (is_tree(object->config().support_type.value) && (object->config().support_style == smsTreeOrganic ||
-                    // Orca: use organic as default
-                    object->config().support_style == smsDefault)) {
-                    float extrusion_width = std::min(
-                        support_material_flow(object).width(),
-                        support_material_interface_flow(object).width());
-                    if (object->config().tree_support_tip_diameter < extrusion_width - EPSILON)
-                        return { L("Organic support tree tip diameter must not be smaller than support material extrusion width."), object, "tree_support_tip_diameter" };
-                    if (object->config().tree_support_branch_diameter_organic < 2. * extrusion_width - EPSILON)
-                        return { L("Organic support branch diameter must not be smaller than 2x support material extrusion width."), object, "tree_support_branch_diameter_organic" };
-                    if (object->config().tree_support_branch_diameter_organic < object->config().tree_support_tip_diameter)
-                        return { L("Organic support branch diameter must not be smaller than support tree tip diameter."), object, "tree_support_branch_diameter_organic" };
+                if (is_tree(object->config().support_type.value)) {
+                    if (object->config().support_style == smsTreeOrganic ||
+                        // Orca: use organic as default
+                        object->config().support_style == smsDefault) {
+
+                        if (warning) {
+                            // Orca: check the support wall count and the base pattern
+                            if (object->config().tree_support_wall_count > 1 &&
+                                object->config().support_base_pattern != SupportMaterialPattern::smpNone &&
+                                object->config().support_base_pattern != SupportMaterialPattern::smpDefault) {
+                                warning->string = L("For Organic supports, two walls are supported only with the Hollow/Default base pattern.");
+                                warning->opt_key = "support_base_pattern";
+                            }
+
+                            // Orca: check if the Lightning base pattern selected
+                            if (object->config().support_base_pattern == SupportMaterialPattern::smpLightning) {
+                                warning->string = L(
+                                    "The Lightning base pattern is not supported by this support type; Rectilinear will be used instead.");
+                                warning->opt_key = "support_base_pattern";
+                            }
+                        }
+
+                        float extrusion_width = std::min(
+                            support_material_flow(object).width(),
+                            support_material_interface_flow(object).width());
+                        if (object->config().tree_support_tip_diameter < extrusion_width - EPSILON)
+                            return { L("Organic support tree tip diameter must not be smaller than support material extrusion width."), object, "tree_support_tip_diameter" };
+                        if (object->config().tree_support_branch_diameter_organic < 2. * extrusion_width - EPSILON)
+                            return { L("Organic support branch diameter must not be smaller than 2x support material extrusion width."), object, "tree_support_branch_diameter_organic" };
+                        if (object->config().tree_support_branch_diameter_organic < object->config().tree_support_tip_diameter)
+                            return { L("Organic support branch diameter must not be smaller than support tree tip diameter."), object, "tree_support_branch_diameter_organic" };
+                    }
+                } else if (object->config().support_base_pattern == SupportMaterialPattern::smpLightning && warning) {
+                    // Orca: check if the Lightning base pattern selected
+                    warning->string  = L("The Lightning base pattern is not supported by this support type; Rectilinear will be used instead.");
+                    warning->opt_key = "support_base_pattern";
+                } else if (object->config().support_base_pattern == SupportMaterialPattern::smpNone && warning) {
+                    // Orca: check if the Hollow base pattern selected
+                    warning->string  = L("The Hollow base pattern is not supported by this support type; Rectilinear will be used instead.");
+                    warning->opt_key = "support_base_pattern";
                 }
             }
 
@@ -1363,8 +2142,10 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     bool has_enforcers = mv->is_support_enforcer() ||
                         (mv->is_model_part() && mv->supported_facets.has_facets(*mv, EnforcerBlockerType::ENFORCER));
                     if (has_enforcers) {
-                        warning->string = L("Support enforcers are used but support is not enabled. Please enable support.");
-                        warning->object = object;
+                        StringObjectException warningtemp;
+                        warningtemp.string = L("Support enforcers are used but support is not enabled. Please enable support.");
+                        warningtemp.object  = object;
+                        *warning            = warningtemp;
                         break;
                     }
                 }
@@ -1385,12 +2166,12 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 first_layer_min_nozzle_diameter = min_nozzle_diameter;
             }
             if (initial_layer_print_height > first_layer_min_nozzle_diameter)
-                return  {L("Layer height cannot exceed nozzle diameter"), object, "initial_layer_print_height"};
+                return {L("Layer height cannot exceed nozzle diameter."), object, "initial_layer_print_height"};
 
             // validate layer_height
             double layer_height = object->config().layer_height.value;
             if (layer_height > min_nozzle_diameter)
-                return  {L("Layer height cannot exceed nozzle diameter"), object, "layer_height"};
+                return {L("Layer height cannot exceed nozzle diameter."), object, "layer_height"};
 
             // Validate extrusion widths.
             std::string err_msg;
@@ -1400,39 +2181,93 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 if (!validate_extrusion_width(object->config(), "support_line_width", layer_height, err_msg))
                     return {err_msg, object, "support_line_width"};
             }
-            for (const char *opt_key : { "inner_wall_line_width", "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width", "top_surface_line_width" })
+            for (const char *opt_key : { "inner_wall_line_width", "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width", "top_surface_line_width","skin_infill_line_width" ,"skeleton_infill_line_width"})
 				for (const PrintRegion &region : object->all_regions())
                     if (!validate_extrusion_width(region.config(), opt_key, layer_height, err_msg))
 		            	return  {err_msg, object, opt_key};
+
+            const bool allow_thin_bridge_width = object->config().thick_bridges && object->config().thick_internal_bridges;
+            for (const PrintRegion &region : object->all_regions()) {
+                const auto &bridge_width_opt = region.config().bridge_line_width;
+                for (FlowRole bridge_role : { frPerimeter, frInfill, frSolidInfill, frTopSolidInfill }) {
+                    const double nozzle_diameter = m_config.nozzle_diameter.get_at(region.extruder(bridge_role) - 1);
+                    const double bridge_width    = bridge_width_opt.get_abs_value(nozzle_diameter);
+                    if (bridge_width <= 0.)
+                        continue;
+                    if (bridge_width > nozzle_diameter) {
+                        err_msg = L("Bridge line width must not exceed nozzle diameter");
+                        return { err_msg, object, "bridge_line_width" };
+                    }
+                    if (!allow_thin_bridge_width && bridge_width <= layer_height) {
+                        err_msg = L("Too small line width");
+                        return { err_msg, object, "bridge_line_width" };
+                    }
+                }
+            }
         }
     }
 
     // Orca: G92 E0 is not supported when using absolute extruder addressing
-    // This check is copied from PrusaSlicer, the original author is Vojtech Bubnik
-    if(!is_BBL_printer()) {
-        bool before_layer_gcode_resets_extruder =
-            boost::regex_search(m_config.before_layer_change_gcode.value, regex_g92e0);
-        bool layer_gcode_resets_extruder = boost::regex_search(m_config.layer_change_gcode.value, regex_g92e0);
-        if (m_config.use_relative_e_distances) {
-            // See GH issues #6336 #5073
-            if ((m_config.gcode_flavor == gcfMarlinLegacy || m_config.gcode_flavor == gcfMarlinFirmware) &&
-                !before_layer_gcode_resets_extruder && !layer_gcode_resets_extruder)
-                return {L("Relative extruder addressing requires resetting the extruder position at each layer to "
-                          "prevent loss of floating point accuracy. Add \"G92 E0\" to layer_gcode."),
-                        nullptr, "before_layer_change_gcode"};
-        } else if (before_layer_gcode_resets_extruder)
-            return {L("\"G92 E0\" was found in before_layer_gcode, which is incompatible with absolute extruder "
+    // This check is modified from PrusaSlicer, the original author is Vojtech Bubnik
+    // Orca: case‑sensitive match for exactly "G92 E0" (uppercase G and E only) 
+    // because gcode is case sensitive and G92 e0 satisfies the regex but causes a slicing error
+    // https://github.com/OrcaSlicer/OrcaSlicer/issues/13927
+
+	    // Matches any case of "G92 E0" (original pattern)
+    static const boost::regex regex_g92e0 {
+        "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$"
+    };
+    // Matches only the exact uppercase "G92 E0"
+    static const boost::regex regex_g92e0_correct {
+        "^[ \\t]*G92[ \\t]*E(0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$"
+    };
+
+    const bool before_has_g92_any = boost::regex_search(
+        m_config.before_layer_change_gcode.value, regex_g92e0);
+    const bool layer_has_g92_any  = boost::regex_search(
+        m_config.layer_change_gcode.value, regex_g92e0);
+
+    if (m_config.use_relative_e_distances) {
+        // Relative mode: "G92 E0" is required to reset extruder position.
+        const bool before_has_g92_exact = boost::regex_search(
+            m_config.before_layer_change_gcode.value, regex_g92e0_correct);
+        const bool layer_has_g92_exact  = boost::regex_search(
+            m_config.layer_change_gcode.value, regex_g92e0_correct);
+
+        // Wrong case found?
+        if (before_has_g92_any && !before_has_g92_exact)
+            return {L("\"G92 E0\" was found in before_layer_change_gcode, but the G or E are not uppercase. "
+                      "Please change them to the exact uppercase \"G92 E0\"."),
+                    nullptr, "before_layer_change_gcode"};
+        if (layer_has_g92_any && !layer_has_g92_exact)
+            return {L("\"G92 E0\" was found in layer_change_gcode, but the G or E are not uppercase. "
+                      "Please change them to the exact uppercase \"G92 E0\"."),
+                    nullptr, "layer_change_gcode"};
+
+        // Only Marlin flavours need the reset; BBL printers do not.
+        if ((m_config.gcode_flavor == gcfMarlinLegacy || m_config.gcode_flavor == gcfMarlinFirmware) &&
+            !is_BBL_printer() &&
+            !before_has_g92_exact && !layer_has_g92_exact)
+            return {L("Relative extruder addressing requires resetting the extruder position at each layer to "
+                      "prevent loss of floating point accuracy. Add \"G92 E0\" to layer_gcode."),
+                    nullptr, "before_layer_change_gcode"};
+    } else {
+        // Absolute mode: any occurrence of "G92 E0" is incompatible.
+        if (before_has_g92_any)
+            return {L("\"G92 E0\" was found in before_layer_change_gcode, which is incompatible with absolute extruder "
                       "addressing."),
                     nullptr, "before_layer_change_gcode"};
-        else if (layer_gcode_resets_extruder)
-            return {L("\"G92 E0\" was found in layer_gcode, which is incompatible with absolute extruder addressing."),
+        if (layer_has_g92_any)
+            return {L("\"G92 E0\" was found in layer_change_gcode, which is incompatible with absolute extruder "
+                      "addressing."),
                     nullptr, "layer_change_gcode"};
-    }
+	}
 
     const ConfigOptionDef* bed_type_def = print_config_def.get("curr_bed_type");
     assert(bed_type_def != nullptr);
 
-	    if (is_BBL_printer()) {
+    // ORCA: check if bed type is compatible with all selected filaments
+    if (is_BBL_printer() || m_config.support_multi_bed_types.value) {
 	    const t_config_enum_values* bed_type_keys_map = bed_type_def->enum_keys_map;
 	    for (unsigned int extruder_id : extruders) {
 	        const ConfigOptionInts* bed_temp_opt = m_config.option<ConfigOptionInts>(get_bed_temp_key(m_config.curr_bed_type));
@@ -1486,36 +2321,50 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             };
             std::string warning_key;
 
+            const auto max_junction_deviation = m_config.machine_max_junction_deviation.values[0];
+            const bool ignore_jerk_validation = m_config.gcode_flavor == gcfMarlinFirmware && max_junction_deviation > 0;
+
             // check jerk
-            if (m_default_object_config.default_jerk == 1 || m_default_object_config.outer_wall_jerk == 1 ||
-                m_default_object_config.inner_wall_jerk == 1) {
-               warning->string = L("Setting the jerk speed too low could lead to artifacts on curved surfaces");
-               if (m_default_object_config.outer_wall_jerk == 1)
-                    warning_key = "outer_wall_jerk";
-               else if (m_default_object_config.inner_wall_jerk == 1)
-                    warning_key = "inner_wall_jerk";
-               else
-                    warning_key = "default_jerk";
+            if (!ignore_jerk_validation) {
+                if (m_default_object_config.default_jerk == 1 || m_default_object_config.outer_wall_jerk == 1 ||
+                    m_default_object_config.inner_wall_jerk == 1) {
+                   warning->string = L("Setting the jerk speed too low could lead to artifacts on curved surfaces");
+                   if (m_default_object_config.outer_wall_jerk == 1)
+                        warning_key = "outer_wall_jerk";
+                   else if (m_default_object_config.inner_wall_jerk == 1)
+                        warning_key = "inner_wall_jerk";
+                   else
+                        warning_key = "default_jerk";
 
-               warning->opt_key = warning_key;
+                   warning->opt_key = warning_key;
+                }
+
+                if (warning_key.empty() && m_default_object_config.default_jerk > 0) {
+                   std::vector<std::string> jerk_to_check = {"default_jerk",     "outer_wall_jerk",    "inner_wall_jerk", "infill_jerk",
+                                                             "top_surface_jerk", "initial_layer_jerk", "travel_jerk"};
+                   const auto               max_jerk = std::min(m_config.machine_max_jerk_x.values[0], m_config.machine_max_jerk_y.values[0]);
+                   warning_key.clear();
+                   warning_key = check_motion_ability_object_setting(jerk_to_check, max_jerk);
+                   if (!warning_key.empty()) {
+                        warning->string = L(
+                            "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\n"
+                            "Orca will automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\n"
+                            "You can adjust the maximum jerk setting in your printer's configuration to get higher speeds.");
+                        warning->opt_key = warning_key;
+                   }
+                }
             }
 
-            if (warning_key.empty() && m_default_object_config.default_jerk > 0) {
-               std::vector<std::string> jerk_to_check = {"default_jerk",     "outer_wall_jerk",    "inner_wall_jerk", "infill_jerk",
-                                                         "top_surface_jerk", "initial_layer_jerk", "travel_jerk"};
-               const auto               max_jerk = std::min(m_config.machine_max_jerk_x.values[0], m_config.machine_max_jerk_y.values[0]);
-               warning_key.clear();
-               if (m_default_object_config.default_jerk > 0)
-                    warning_key = check_motion_ability_object_setting(jerk_to_check, max_jerk);
-               if (!warning_key.empty()) {
-                    warning->string = L(
-                        "The jerk setting exceeds the printer's maximum jerk (machine_max_jerk_x/machine_max_jerk_y).\nOrca will "
-                        "automatically cap the jerk speed to ensure it doesn't surpass the printer's capabilities.\nYou can adjust the "
-                        "maximum jerk setting in your printer's configuration to get higher speeds.");
-                    warning->opt_key = warning_key;
-               }
+            // Check junction deviation
+            // Orca: Only marlin FW supports max junction deviation. Dont display warning if firmware is not supporting it.
+            const bool support_max_junction_deviation = ( m_config.gcode_flavor == gcfMarlinFirmware);
+            if (warning_key.empty() && m_default_object_config.default_junction_deviation.value > max_junction_deviation && support_max_junction_deviation) {
+                warning->string  = L( "Junction deviation setting exceeds the printer's maximum value (machine_max_junction_deviation).\n"
+                                      "Orca will automatically cap the junction deviation to ensure it doesn't surpass the printer's capabilities.\n"
+                                      "You can adjust the machine_max_junction_deviation value in your printer's configuration to get higher limits.");
+                warning->opt_key = "default_junction_deviation";
             }
-
+            
             // check acceleration
             const auto max_accel = m_config.machine_max_acceleration_extruding.values[0];
             if (warning_key.empty() && m_default_object_config.default_acceleration > 0 && max_accel > 0) {
@@ -1594,12 +2443,18 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             //    }
             // }
 
+            // check wall sequence and precise outer wall
+            if (m_default_region_config.precise_outer_wall && m_default_region_config.wall_sequence != WallSequence::InnerOuter) {
+                warning->string  = L("The precise wall option will be ignored for outer-inner or inner-outer-inner wall sequences.");
+                warning->opt_key = "precise_outer_wall";
+            }
+
         } catch (std::exception& e) {
             BOOST_LOG_TRIVIAL(warning) << "Orca: validate motion ability failed: " << e.what() << std::endl;
         }
     }
     if (!this->has_same_shrinkage_compensations()){
-        warning->string = L("Filament shrinkage will not be used because filament shrinkage for the used filaments differs significantly.");
+        warning->string = L("Filament shrinkage will not be used because filament shrinkage for the used filaments does not match.");
         warning->opt_key = "";
     }
     return {};
@@ -1684,27 +2539,29 @@ Flow Print::brim_flow() const
         frPerimeter,
         // Flow::new_from_config_width takes care of the percent to value substitution
 		width,
-        (float)m_config.nozzle_diameter.get_at(m_print_regions.front()->config().wall_filament-1),
+        (float)m_config.nozzle_diameter.get_at(m_print_regions.front()->config().outer_wall_filament_id-1),
 		(float)this->skirt_first_layer_height());
 }
 
 Flow Print::skirt_flow() const
 {
+
+    // Orca: fall back to m_config if no objects are present
     ConfigOptionFloatOrPercent width = m_config.initial_layer_line_width;
     if (width.value <= 0)
-        width = m_objects.front()->config().line_width;
+        width = m_objects.empty() ? m_config.initial_layer_line_width : m_objects.front()->config().line_width;
 
     /* We currently use a random object's support material extruder.
        While this works for most cases, we should probably consider all of the support material
        extruders and take the one with, say, the smallest index;
        The same logic should be applied to the code that selects the extruder during G-code
        generation as well. */
-    return Flow::new_from_config_width(
-        frPerimeter,
-        // Flow::new_from_config_width takes care of the percent to value substitution
-		width,
-		(float)m_config.nozzle_diameter.get_at(m_objects.front()->config().support_filament-1),
-		(float)this->skirt_first_layer_height());
+    return Flow::new_from_config_width(frPerimeter,
+                                       // Flow::new_from_config_width takes care of the percent to value substitution
+                                       width,
+                                       (float) m_config.nozzle_diameter.get_at(
+                                           m_objects.empty() ? 0 : m_objects.front()->config().support_filament - 1),
+                                       (float) this->skirt_first_layer_height());
 }
 
 bool Print::has_support_material() const
@@ -1882,11 +2739,15 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 return false;
             if (!model_volume1.mmu_segmentation_facets.equals(model_volume2.mmu_segmentation_facets))
                 return false;
+            if (!model_volume1.fuzzy_skin_facets.equals(model_volume2.fuzzy_skin_facets))
+                return false;
             if (model_volume1.config.get() != model_volume2.config.get())
                 return false;
         }
         //if (!object1->config().equals(object2->config()))
         //    return false;
+        if (model_obj1->layer_height_profile.get() != model_obj2->layer_height_profile.get())
+            return false;
         if (model_obj1->config.get() != model_obj2->config.get())
             return false;
         return true;
@@ -1931,7 +2792,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 }
                 if (!found_shared) {
                     BOOST_LOG_TRIVIAL(warning) << boost::format("Also can not find the shared object, identify_id %1%, maybe shared object is skipped")%obj->model_object()->instances[0]->loaded_id;
-                    //throw Slic3r::SlicingError("Can not find the cached data.");
+                    //throw Slic3r::SlicingError("Cannot find the cached data.");
                     //don't report errot, set use_cache to false, and reslice these objects
                     need_slicing_objects.insert(obj);
                     re_slicing_objects.insert(obj);
@@ -1985,6 +2846,17 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
         }
 
+        // Z-Contouring
+        for (PrintObject *obj : m_objects) {
+            bool need_contouring = need_slicing_objects.count(obj) != 0 && obj->need_z_contouring();
+            if (need_contouring) {
+                obj->contour_z();
+            } else {
+                if (obj->set_started(posContouring))
+                    obj->set_done(posContouring);
+            }
+        }
+
         tbb::parallel_for(tbb::blocked_range<int>(0, int(m_objects.size())),
             [this, need_slicing_objects](const tbb::blocked_range<int>& range) {
                 for (int i = range.begin(); i < range.end(); i++) {
@@ -2023,6 +2895,8 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                     obj->set_done(posInfill);
                 if (obj->set_started(posIroning))
                     obj->set_done(posIroning);
+                if (obj->set_started(posContouring))
+                    obj->set_done(posContouring);
                 if (obj->set_started(posSupportMaterial))
                     obj->set_done(posSupportMaterial);
                 if (obj->set_started(posDetectOverhangsForLift))
@@ -2047,19 +2921,47 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
     }
 
+
+
     if (this->set_started(psWipeTower)) {
+        {
+            std::scoped_lock lock(m_wipe_tower_position_mutex);
+            m_wipe_tower_position_clamped = false;
+        }
+        {
+            std::vector<std::set<int>> geometric_unprintables(m_config.nozzle_diameter.size());
+            for (PrintObject* obj : m_objects) {
+                std::vector<std::set<int>> obj_geometric_unprintables = obj->detect_extruder_geometric_unprintables();
+                for (size_t idx = 0; idx < obj_geometric_unprintables.size(); ++idx) {
+                    if (idx < geometric_unprintables.size()) {
+                        geometric_unprintables[idx].insert(obj_geometric_unprintables[idx].begin(), obj_geometric_unprintables[idx].end());
+                    }
+                }
+            }
+            this->set_geometric_unprintable_filaments(geometric_unprintables);
+        }
+
         m_wipe_tower_data.clear();
         m_tool_ordering.clear();
         if (this->has_wipe_tower()) {
             this->_make_wipe_tower();
-        } else if (this->config().print_sequence != PrintSequence::ByObject) {
-        	// Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool changes and filament switches.
-        	m_tool_ordering = ToolOrdering(*this, -1, false);
+            this->_clamp_generated_wipe_tower_to_printable_area();
+        }
+        else if (this->config().print_sequence != PrintSequence::ByObject) {
+            // Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool changes and filament switches.
+            m_tool_ordering = ToolOrdering(*this, -1, false);
+            m_tool_ordering.sort_and_build_data(*this, -1, false);
             if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1))
                 throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
+
         }
         this->set_done(psWipeTower);
     }
+
+    if (this->has_wipe_tower()) {
+        m_fake_wipe_tower.set_pos({ m_config.wipe_tower_x.get_at(m_plate_index), m_config.wipe_tower_y.get_at(m_plate_index) });
+    }
+
     if (this->set_started(psSkirtBrim)) {
         this->set_status(70, L("Generating skirt & brim"));
 
@@ -2067,15 +2969,13 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             start_time = (long long)Slic3r::Utils::get_current_time_utc();
 
         m_skirt.clear();
+        m_skirt_brim_groups.clear();
+        m_has_shared_per_object_skirt = false;
         m_skirt_convex_hull.clear();
+        m_objectBrimAreas.clear();
+        m_supportBrimAreas.clear();
         m_first_layer_convex_hull.points.clear();
-        const bool draft_shield = config().draft_shield != dsDisabled;
-
-        if (this->has_skirt() && draft_shield) {
-            // In case that draft shield is active, generate skirt first so brim
-            // can be trimmed to make room for it.
-            _make_skirt();
-        }
+        for (PrintObject *object : m_objects)  object->m_skirt.clear();
 
         //BBS: get the objects' indices when GCodes are generated
         ToolOrdering tool_ordering;
@@ -2088,10 +2988,54 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         if (this->config().print_sequence == PrintSequence::ByObject) {
             // Order object instances for sequential print.
             print_object_instances_ordering = sort_object_instances_by_model_order(*this);
+            std::vector<unsigned int> first_layer_used_filaments;
+            std::vector<std::vector<unsigned int>> all_filaments;
+            for (print_object_instance_sequential_active = print_object_instances_ordering.begin(); print_object_instance_sequential_active != print_object_instances_ordering.end(); ++print_object_instance_sequential_active) {
+                tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
+                const auto& mgr = this->mixed_filament_manager();
+                const size_t num_phys = this->config().filament_diameter.values.size();
+                for (size_t idx = 0; idx < tool_ordering.layer_tools().size(); ++idx) {
+                    auto layer_filament = tool_ordering.layer_tools()[idx].extruders;
+                    std::vector<unsigned int> expanded;
+                    for (const unsigned int filament_idx : layer_filament) {
+                        const unsigned int filament_id = filament_idx + 1;
+                        const std::vector<unsigned int> physical_indices =
+                            mgr.physical_extruder_indices_for_filament(filament_id, num_phys, false);
+                        if (filament_id > num_phys && !physical_indices.empty()) {
+                            expanded.insert(expanded.end(), physical_indices.begin(), physical_indices.end());
+                        } else {
+                            expanded.push_back(filament_idx);
+                        }
+                    }
+                    std::sort(expanded.begin(), expanded.end());
+                    expanded.erase(std::unique(expanded.begin(), expanded.end()), expanded.end());
+                    if (idx == 0)
+                        first_layer_used_filaments.insert(first_layer_used_filaments.end(), expanded.begin(), expanded.end());
+                    all_filaments.emplace_back(std::move(expanded));
+                }
+            }
+            sort_remove_duplicates(first_layer_used_filaments);
+            auto used_filaments = collect_sorted_used_filaments(all_filaments);
+            this->set_slice_used_filaments(first_layer_used_filaments,used_filaments);
+
+            auto physical_unprintables = this->get_physical_unprintable_filaments(used_filaments);
+            auto geometric_unprintables = this->get_geometric_unprintable_filaments();
+            std::vector<int>filament_maps = this->get_filament_maps();
+            auto map_mode = get_filament_map_mode();
+            // get recommended filament map
+            if (map_mode < FilamentMapMode::fmmManual) {
+                filament_maps = ToolOrdering::get_recommended_filament_maps(all_filaments, this, map_mode, physical_unprintables, geometric_unprintables);
+                std::transform(filament_maps.begin(), filament_maps.end(), filament_maps.begin(), [](int value) { return value + 1; });
+                update_filament_maps_to_config(filament_maps);
+            }
+            // check map valid both in auto and mannual mode
+            std::transform(filament_maps.begin(), filament_maps.end(), filament_maps.begin(), [](int value) {return value - 1; });
+
             //        print_object_instances_ordering = sort_object_instances_by_max_z(print);
             print_object_instance_sequential_active = print_object_instances_ordering.begin();
             for (; print_object_instance_sequential_active != print_object_instances_ordering.end(); ++print_object_instance_sequential_active) {
                 tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
+                tool_ordering.sort_and_build_data(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
                 if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1)) {
                     append(printExtruders, tool_ordering.tools_for_layer(layers_to_print.front().first).extruders);
                 }
@@ -2100,6 +3044,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         else {
             tool_ordering = this->tool_ordering();
             tool_ordering.assign_custom_gcodes(*this);
+
+            std::vector<unsigned int> first_layer_used_filaments;
+            if (!tool_ordering.layer_tools().empty())
+                first_layer_used_filaments = tool_ordering.layer_tools().front().extruders;
+
+            this->set_slice_used_filaments(first_layer_used_filaments, tool_ordering.all_extruders());
             has_wipe_tower = this->has_wipe_tower() && tool_ordering.has_wipe_tower();
             initial_extruder_id = tool_ordering.first_extruder();
             print_object_instances_ordering = chain_print_object_instances(*this);
@@ -2124,7 +3074,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         if (this->has_brim()) {
             Polygons islands_area;
             make_brim(*this, this->make_try_cancel(), islands_area, m_brimMap,
-                m_supportBrimMap, objPrintVec, printExtruders);
+                m_supportBrimMap, objPrintVec, printExtruders, &m_objectBrimAreas, &m_supportBrimAreas);
             for (Polygon& poly_ex : islands_area)
                 poly_ex.douglas_peucker(SCALED_RESOLUTION);
             for (Polygon &poly : union_(this->first_layer_islands(), islands_area))
@@ -2132,11 +3082,16 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
 
 
-        if (has_skirt() && ! draft_shield) {
-            // In case that draft shield is NOT active, generate skirt now.
-            // It will be placed around the brim, so brim has to be ready.
+        if (has_skirt() || has_infinite_skirt() || has_brim()) {
+            // Generate skirt/brim groups after brim so per-object and draft-shield footprints
+            // include brims when grouping and offsetting skirt loops.
             assert(m_skirt.empty());
             _make_skirt();
+            if (m_config.print_sequence == PrintSequence::ByObject &&
+                m_config.skirt_type == stPerObject &&
+                this->has_shared_per_object_skirt()) {
+                throw Slic3r::SlicingError(L("Per-object skirts cannot fit between the objects in By object print sequence.\n\nMove the objects farther apart, reduce brim/skirt size, switch Skirt type to Combined, or switch Print sequence to By layer."));
+            }
         }
 
         this->finalize_first_layer_convex_hull();
@@ -2171,8 +3126,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             break;
         }
     }
-    // TODO adaptive layer height won't work with conflict checker because m_fake_wipe_tower's path is generated using fixed layer height
-    if(!m_no_check && !has_adaptive_layer_height)
+    if(!m_no_check /*&& !has_adaptive_layer_height*/)
     {
         using Clock                 = std::chrono::high_resolution_clock;
         auto            startTime   = Clock::now();
@@ -2220,14 +3174,17 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     const Vec3d origin = this->get_plate_origin();
     gcode.set_gcode_offset(origin(0), origin(1));
     gcode.do_export(this, path.c_str(), result, thumbnail_cb);
-
+    gcode.export_layer_filaments(result);
     //BBS
-    result->conflict_result = m_conflict_result;
+    if (result != nullptr)
+        result->conflict_result = m_conflict_result;
     return path.c_str();
 }
 
 void Print::_make_skirt()
 {
+    const bool generate_skirt = this->has_skirt() || this->has_infinite_skirt();
+
     // First off we need to decide how tall the skirt must be.
     // The skirt_height option from config is expressed in layers, but our
     // object might have different layer heights, so we need to find the print_z
@@ -2239,23 +3196,27 @@ void Print::_make_skirt()
     // prepended to the first 'n' layers (with 'n' = skirt_height).
     // $skirt_height_z in this case is the highest possible skirt height for safety.
     coordf_t skirt_height_z = 0.;
-    for (const PrintObject *object : m_objects) {
-        size_t skirt_layers = this->has_infinite_skirt() ?
-            object->layer_count() :
-            std::min(size_t(m_config.skirt_height.value), object->layer_count());
-        skirt_height_z = std::max(skirt_height_z, object->m_layers[skirt_layers-1]->print_z);
+    if (generate_skirt) {
+        for (const PrintObject *object : m_objects) {
+            size_t skirt_layers = this->has_infinite_skirt() ?
+                object->layer_count() :
+                std::min(size_t(m_config.skirt_height.value), object->layer_count());
+            skirt_height_z = std::max(skirt_height_z, object->m_layers[skirt_layers-1]->print_z);
+        }
     }
 
-    // Collect points from all layers contained in skirt height.
-    Points points;
+    struct ObjectSkirtHull {
+        PrintObject* object;
+        Polygon      hull;
+    };
 
-    // BBS
-    std::map<PrintObject*, Polygon> object_convex_hulls;
+    // Orca: build one local occupied hull per object from object and support geometry up to skirt height.
+    std::vector<ObjectSkirtHull> object_convex_hulls;
     for (PrintObject *object : m_objects) {
         Points object_points;
         // Get object layers up to skirt_height_z.
         for (const Layer *layer : object->m_layers) {
-            if (layer->print_z > skirt_height_z)
+            if (generate_skirt && layer->print_z > skirt_height_z)
                 break;
             for (const ExPolygon &expoly : layer->lslices)
                 // Collect the outer contour points only, ignore holes for the calculation of the convex hull.
@@ -2263,35 +3224,18 @@ void Print::_make_skirt()
         }
         // Get support layers up to skirt_height_z.
         for (const SupportLayer *layer : object->support_layers()) {
-            if (layer->print_z > skirt_height_z)
+            if (generate_skirt && layer->print_z > skirt_height_z)
                 break;
             layer->support_fills.collect_points(object_points);
         }
 
-        object_convex_hulls.insert({ object, Slic3r::Geometry::convex_hull(object_points) });
-
-        // Repeat points for each object copy.
-        for (const PrintInstance &instance : object->instances()) {
-            Points copy_points = object_points;
-            for (Point &pt : copy_points)
-                pt += instance.shift;
-            append(points, copy_points);
-        }
+        object_convex_hulls.push_back({ object, Slic3r::Geometry::convex_hull(object_points) });
     }
 
-    // Include the wipe tower.
-    append(points, this->first_layer_wipe_tower_corners());
-
-    // Unless draft shield is enabled, include all brims as well.
-    if (config().draft_shield == dsDisabled)
-        append(points, m_first_layer_convex_hull.points);
-
-    if (points.size() < 3)
-        // At least three points required for a convex hull.
+    if (object_convex_hulls.empty())
         return;
 
     this->throw_if_canceled();
-    Polygon convex_hull = Slic3r::Geometry::convex_hull(points);
 
     // Skirt may be printed on several layers, having distinct layer heights,
     // but loops must be aligned so can't vary width/spacing
@@ -2313,13 +3257,13 @@ void Print::_make_skirt()
         }
     }
 
-    // Initial offset of the brim inner edge from the object (possible with a support & raft).
-    // The skirt will touch the brim if the brim is extruded.
-    auto   distance = float(scale_(m_config.skirt_distance.value - spacing/2.));
-    // Draw outlines from outside to inside.
+    // Initial skirt centerline offset from the occupied outline.
+    // The skirt will touch the occupied outline if skirt_distance is zero.
+    // Generate loops inward to outward; callers reverse them before G-code export.
     // Loop while we have less skirts than required or any extruder hasn't reached the min length if any.
-    std::vector<coordf_t> extruded_length(extruders.size(), 0.);
-    if (m_config.skirt_type == stCombined) {
+    auto append_skirt_loops_for_hull = [&](const Polygon& hull, ExtrusionEntityCollection& dst, bool collect_skirt_hull) {
+        float distance = float(scale_(m_config.skirt_distance.value - spacing/2.));
+        std::vector<coordf_t> extruded_length(extruders.size(), 0.);
         for (size_t i = m_config.skirt_loops, extruder_idx = 0; i > 0; -- i) {
             this->throw_if_canceled();
             // Offset the skirt outside.
@@ -2327,8 +3271,8 @@ void Print::_make_skirt()
             // Generate the skirt centerline.
             Polygon loop;
             {
-                // BBS. skirt_distance is defined as the gap between skirt and outer most brim, so no need to add max_brim_width
-                Polygons loops = offset(convex_hull, distance, ClipperLib::jtRound, float(scale_(0.1)));
+                // Orca: the hull already represents the occupied outline used for this skirt.
+                Polygons loops = offset(hull, distance, ClipperLib::jtRound, float(scale_(0.1)));
                 Geometry::simplify_polygons(loops, scale_(0.05), &loops);
 			    if (loops.empty())
 				    break;
@@ -2343,8 +3287,8 @@ void Print::_make_skirt()
                     flow.width(),
 				    (float)initial_layer_print_height  // this will be overridden at G-code export time
                 )));
-            eloop.paths.back().polyline = loop.split_at_first_point();
-            m_skirt.append(eloop);
+            eloop.paths.back().polyline = Polyline3(loop.split_at_first_point());
+            dst.append(eloop);
             if (m_config.min_skirt_length.value > 0) {
                 // The skirt length is limited. Sum the total amount of filament length extruded, in mm.
                 extruded_length[extruder_idx] += unscale<double>(loop.length()) * extruders_e_per_mm[extruder_idx];
@@ -2360,69 +3304,228 @@ void Print::_make_skirt()
                         ++ extruder_idx;
                 }
             } else {
-                // The skirt lenght is not limited, extrude the skirt with the 1st extruder only.
+                // The skirt length is not limited, extrude the skirt with the 1st extruder only.
             }
         }
-    } else {
-        m_skirt.clear();
-    }
-    // Brims were generated inside out, reverse to print the outmost contour first.
-    m_skirt.reverse();
 
-    // Remember the outer edge of the last skirt line extruded as m_skirt_convex_hull.
-    for (Polygon &poly : offset(convex_hull, distance + 0.5f * float(scale_(spacing)), ClipperLib::jtRound, float(scale_(0.1))))
-        append(m_skirt_convex_hull, std::move(poly.points));
+        if (collect_skirt_hull)
+            for (Polygon &poly : offset(hull, distance + 0.5f * float(scale_(spacing)), ClipperLib::jtRound, float(scale_(0.1))))
+                append(m_skirt_convex_hull, std::move(poly.points));
+    };
 
-    if (m_config.skirt_type == stPerObject) {
-        // BBS
-        for (auto obj_cvx_hull : object_convex_hulls) {
-            double object_skirt_distance = float(scale_(m_config.skirt_distance.value - spacing/2.));
-            PrintObject* object = obj_cvx_hull.first;
-            object->m_skirt.clear();
-            extruded_length.assign(extruded_length.size(), 0.);
-            for (size_t i = m_config.skirt_loops.value, extruder_idx = 0; i > 0; -- i) {
-                object_skirt_distance += float(scale_(spacing));
-                Polygon loop;
-                {
-                    // BBS. skirt_distance is defined as the gap between skirt and outer most brim, so no need to add max_brim_width
-                    Polygons loops = offset(obj_cvx_hull.second, object_skirt_distance, ClipperLib::jtRound, float(scale_(0.1)));
-                    Geometry::simplify_polygons(loops, scale_(0.05), &loops);
-                    if (loops.empty())
-                        break;
-                    loop = loops.front();
-                }
+    m_skirt.clear();
+    m_skirt_brim_groups.clear();
+    m_has_shared_per_object_skirt = false;
+    for (const ObjectSkirtHull& object_hull : object_convex_hulls)
+        object_hull.object->m_skirt.clear();
 
-                // Extrude the skirt loop.
-                ExtrusionLoop eloop(elrSkirt);
-                eloop.paths.emplace_back(ExtrusionPath(
-                    ExtrusionPath(
-                        erSkirt,
-                        (float)mm3_per_mm,         // this will be overridden at G-code export time
-                        flow.width(),
-                        (float)initial_layer_print_height  // this will be overridden at G-code export time
-                    )));
-                eloop.paths.back().polyline = loop.split_at_first_point();
-                object->m_skirt.append(std::move(eloop));
-                if (m_config.min_skirt_length.value > 0) {
-                    // The skirt length is limited. Sum the total amount of filament length extruded, in mm.
-                    extruded_length[extruder_idx] += unscale<double>(loop.length()) * extruders_e_per_mm[extruder_idx];
-                    if (extruded_length[extruder_idx] < m_config.min_skirt_length.value) {
-                        // Not extruded enough yet with the current extruder. Add another loop.
-                        if (i == 1)
-                            ++ i;
-                    } else {
-                        assert(extruded_length[extruder_idx] >= m_config.min_skirt_length.value);
-                        // Enough extruded with the current extruder. Extrude with the next one,
-                        // until the prescribed number of skirt loops is extruded.
-                        if (extruder_idx + 1 < extruders.size())
-                            ++ extruder_idx;
-                    }
-                } else {
-                    // The skirt lenght is not limited, extrude the skirt with the 1st extruder only.
-                }
+    if (m_config.skirt_type == stCombined || m_config.skirt_type == stPerObject) {
+        struct SkirtGroupItem {
+            Points       occupied_points;
+            ObjectID     object_id;
+            bool         emits_skirt;
+        };
 
+        // Orca: group items represent occupied first-layer areas. Object items emit skirts;
+        // obstacle-only items, such as wipe tower, only force nearby object groups to merge.
+        std::vector<SkirtGroupItem> group_items;
+        const coord_t grouping_offset = scale_(m_config.skirt_distance.value + m_config.skirt_loops.value * spacing);
+        for (const ObjectSkirtHull& object_hull : object_convex_hulls) {
+            PrintObject* object = object_hull.object;
+            Points occupied_points;
+            for (const PrintInstance &instance : object->instances()) {
+                Points copy_points = object_hull.hull.points;
+                for (Point &pt : copy_points)
+                    pt += instance.shift;
+                append(occupied_points, copy_points);
             }
-            object->m_skirt.reverse();
+
+            auto append_brim_points = [&occupied_points](const ExPolygons& areas) {
+                for (const ExPolygon& area : areas)
+                    append(occupied_points, area.contour.points);
+            };
+            if (auto it = m_objectBrimAreas.find(object->id()); it != m_objectBrimAreas.end())
+                append_brim_points(it->second);
+            if (auto it = m_supportBrimAreas.find(object->id()); it != m_supportBrimAreas.end())
+                append_brim_points(it->second);
+            if (occupied_points.size() < 3)
+                continue;
+
+            // Orca: include the object's brim/support-brim footprint before checking skirt collisions.
+            group_items.push_back({ std::move(occupied_points), object->id(), true });
+        }
+
+        // Orca: the wipe tower contributes occupied area, but does not emit a skirt by itself.
+        Points wipe_tower_points = this->first_layer_wipe_tower_corners();
+        if (wipe_tower_points.size() >= 3)
+            group_items.push_back({ std::move(wipe_tower_points), ObjectID(), false });
+
+        std::vector<size_t> parent(group_items.size());
+        std::iota(parent.begin(), parent.end(), 0);
+        // Orca: union-find keeps collision merging local without repeatedly rebuilding item lists.
+        auto find_parent = [&parent](size_t idx) {
+            while (parent[idx] != idx) {
+                parent[idx] = parent[parent[idx]];
+                idx = parent[idx];
+            }
+            return idx;
+        };
+        auto unite = [&parent, &find_parent](size_t a, size_t b) {
+            a = find_parent(a);
+            b = find_parent(b);
+            if (a != b)
+                parent[b] = a;
+        };
+
+        // Orca: combined skirt is the same grouping model with all items forced into one group.
+        if (m_config.skirt_type == stCombined && !group_items.empty())
+            for (size_t i = 1; i < group_items.size(); ++i)
+                unite(0, i);
+
+        auto build_grouped_points = [&]() {
+            struct GroupData {
+                Points                points;
+                std::vector<ObjectID> object_ids;
+                bool                  emits_skirt = false;
+            };
+
+            std::map<size_t, GroupData> grouped;
+            for (size_t i = 0; i < group_items.size(); ++i) {
+                GroupData& group = grouped[find_parent(i)];
+                append(group.points, group_items[i].occupied_points);
+                if (group_items[i].object_id.valid())
+                    group.object_ids.push_back(group_items[i].object_id);
+                group.emits_skirt = group.emits_skirt || group_items[i].emits_skirt;
+            }
+            return grouped;
+        };
+
+        bool groups_changed = m_config.skirt_type == stPerObject;
+        while (groups_changed) {
+            groups_changed = false;
+            auto grouped_points = build_grouped_points();
+            std::vector<std::pair<size_t, Polygon>> group_envelopes;
+            for (const auto& [root, group] : grouped_points) {
+                if (group.points.size() < 3)
+                    continue;
+
+                // Orca: emitting groups are expanded to their final skirt reach; obstacle groups are not.
+                Polygon envelope = Geometry::convex_hull(group.points);
+                if (group.emits_skirt) {
+                    // Orca: merge groups when a skirt envelope intersects another group or obstacle.
+                    Polygons envelopes = offset(envelope, grouping_offset, ClipperLib::jtRound, float(scale_(0.1)));
+                    if (envelopes.empty())
+                        continue;
+                    envelope = std::move(envelopes.front());
+                }
+                group_envelopes.emplace_back(root, std::move(envelope));
+            }
+
+            for (size_t i = 0; i < group_envelopes.size(); ++i) {
+                for (size_t j = i + 1; j < group_envelopes.size(); ++j) {
+                    const size_t root_i = find_parent(group_envelopes[i].first);
+                    const size_t root_j = find_parent(group_envelopes[j].first);
+                    if (root_i != root_j && !intersection(group_envelopes[i].second, group_envelopes[j].second).empty()) {
+                        unite(root_i, root_j);
+                        groups_changed = true;
+                    }
+                }
+            }
+        }
+
+        auto make_group_brims = [this](const std::vector<ObjectID>& group_object_ids) {
+            std::vector<SkirtBrimGroup::Brim> brims;
+            std::vector<ObjectID> brim_object_ids;
+            for (ObjectID object_id : group_object_ids) {
+                const auto brim_it = m_brimMap.find(object_id);
+                if (brim_it != m_brimMap.end() && !brim_it->second.empty())
+                    brim_object_ids.push_back(object_id);
+            }
+
+            const bool global_combined_brim = m_config.combine_brims && m_config.skirt_type != stPerObject && m_brimMap.size() == 1;
+            auto brim_owner_ids = [&group_object_ids, global_combined_brim](const std::vector<ObjectID>& object_ids) {
+                return global_combined_brim ? group_object_ids : object_ids;
+            };
+
+            const bool combine_group_brims = m_config.combine_brims && brim_object_ids.size() > 1;
+            if (!combine_group_brims) {
+                for (ObjectID object_id : brim_object_ids)
+                    brims.push_back({ m_brimMap.at(object_id), brim_owner_ids({ object_id }) });
+                return brims;
+            }
+
+            std::vector<size_t> brim_parent(brim_object_ids.size());
+            std::iota(brim_parent.begin(), brim_parent.end(), 0);
+            auto find_brim_parent = [&brim_parent](size_t idx) {
+                while (brim_parent[idx] != idx) {
+                    brim_parent[idx] = brim_parent[brim_parent[idx]];
+                    idx = brim_parent[idx];
+                }
+                return idx;
+            };
+            auto unite_brims = [&brim_parent, &find_brim_parent](size_t a, size_t b) {
+                a = find_brim_parent(a);
+                b = find_brim_parent(b);
+                if (a != b)
+                    brim_parent[b] = a;
+            };
+
+            const coord_t brim_contact_distance = coord_t(brim_flow().scaled_spacing() * 2.);
+            for (size_t i = 0; i < brim_object_ids.size(); ++i) {
+                const auto area_i = m_objectBrimAreas.find(brim_object_ids[i]);
+                if (area_i == m_objectBrimAreas.end())
+                    continue;
+                for (size_t j = i + 1; j < brim_object_ids.size(); ++j) {
+                    const auto area_j = m_objectBrimAreas.find(brim_object_ids[j]);
+                    if (area_j != m_objectBrimAreas.end() &&
+                        !intersection_ex(offset_ex(area_i->second, brim_contact_distance, jtRound, SCALED_RESOLUTION), area_j->second).empty())
+                        unite_brims(i, j);
+                }
+            }
+
+            std::map<size_t, std::vector<ObjectID>> combined_brim_ids;
+            for (size_t i = 0; i < brim_object_ids.size(); ++i)
+                combined_brim_ids[find_brim_parent(i)].push_back(brim_object_ids[i]);
+
+            for (const auto& [_, object_ids] : combined_brim_ids) {
+                if (object_ids.size() == 1) {
+                    brims.push_back({ m_brimMap.at(object_ids.front()), brim_owner_ids(object_ids) });
+                    continue;
+                }
+
+                ExPolygons combined_area;
+                for (ObjectID object_id : object_ids)
+                    expolygons_append(combined_area, m_objectBrimAreas.at(object_id));
+                combined_area = union_ex(combined_area);
+                const float scaled_resolution  = float(scaled(m_config.resolution.value));
+                const float brim_cleanup_delta = std::max(scaled_resolution, float(SCALED_EPSILON));
+                combined_area = offset2_ex(combined_area, brim_cleanup_delta, -brim_cleanup_delta, jtRound, scaled_resolution);
+
+                Polygons islands_area;
+                brims.push_back({ makeBrimInfillFromPlateCoordinates(combined_area, *this, islands_area), object_ids });
+            }
+
+            return brims;
+        };
+
+        auto grouped_points = build_grouped_points();
+        for (auto& [_, group] : grouped_points) {
+            if (!group.emits_skirt || group.points.size() < 3)
+                continue;
+            if (generate_skirt && m_config.skirt_type == stPerObject && group.object_ids.size() > 1)
+                m_has_shared_per_object_skirt = true;
+            // Orca: after merging, use the occupied outline directly; do not add skirt distance twice.
+            ExtrusionEntityCollection group_skirt;
+            if (generate_skirt)
+                append_skirt_loops_for_hull(Geometry::convex_hull(group.points), group_skirt, true);
+            std::vector<SkirtBrimGroup::Brim> group_brims = make_group_brims(group.object_ids);
+            if (!group_skirt.empty()) {
+                group_skirt.reverse();
+                // Orca: keep m_skirt as a flattened compatibility mirror for preview/extents.
+                m_skirt.append(group_skirt.entities);
+            }
+            if (!group_skirt.empty() || !group_brims.empty())
+                m_skirt_brim_groups.push_back({ std::move(group_skirt), std::move(group.object_ids), std::move(group_brims) });
         }
     }
 }
@@ -2452,25 +3555,31 @@ Polygons Print::first_layer_islands() const
     return islands;
 }
 
-std::vector<Point> Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) const
+Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) const
 {
-    std::vector<Point> corners;
+    Points corners;
     if (check_wipe_tower_existance && (!has_wipe_tower() || m_wipe_tower_data.tool_changes.empty()))
         return corners;
     {
-        double width = m_config.prime_tower_width + 2*m_wipe_tower_data.brim_width;
-        double depth = m_wipe_tower_data.depth + 2*m_wipe_tower_data.brim_width;
-        Vec2d pt0(-m_wipe_tower_data.brim_width, -m_wipe_tower_data.brim_width);
-        
-        // First the corners.
-        std::vector<Vec2d> pts = { pt0,
-                                   Vec2d(pt0.x()+width, pt0.y()),
-                                   Vec2d(pt0.x()+width, pt0.y()+depth),
-                                   Vec2d(pt0.x(),pt0.y()+depth)
-                                 };
+        double width = m_wipe_tower_data.bbx.max.x() - m_wipe_tower_data.bbx.min.x();
+        double depth = m_wipe_tower_data.bbx.max.y() -m_wipe_tower_data.bbx.min.y();
+        Vec2d  pt0   = m_wipe_tower_data.bbx.min + m_wipe_tower_data.rib_offset.cast<double>();
+
+        std::vector<Vec2d> pts;
+        if (m_wipe_tower_data.wipe_tower_mesh_data && m_wipe_tower_data.wipe_tower_mesh_data->bottom.points.size() >= 3) {
+            pts.reserve(m_wipe_tower_data.wipe_tower_mesh_data->bottom.points.size());
+            for (const Point &pt : m_wipe_tower_data.wipe_tower_mesh_data->bottom.points)
+                pts.emplace_back(unscale(pt).cast<double>());
+        } else {
+            pts = { pt0,
+                    Vec2d(pt0.x()+width, pt0.y()),
+                    Vec2d(pt0.x()+width, pt0.y()+depth),
+                    Vec2d(pt0.x(),pt0.y()+depth)
+                  };
+        }
 
         // Now the stabilization cone.
-        Vec2d center = (pts[0] + pts[2])/2.;
+        Vec2d center = pt0 + Vec2d(width, depth) / 2.;
         const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width, m_wipe_tower_data.height, m_wipe_tower_data.depth, m_config.wipe_tower_cone_angle);
         double r = cone_R + m_wipe_tower_data.brim_width;
         for (double alpha = 0.; alpha<2*M_PI; alpha += M_PI/20.)
@@ -2486,6 +3595,90 @@ std::vector<Point> Print::first_layer_wipe_tower_corners(bool check_wipe_tower_e
     return corners;
 }
 
+bool Print::_clamp_generated_wipe_tower_to_printable_area()
+{
+    if (!this->has_wipe_tower() || m_wipe_tower_data.tool_changes.empty() || m_config.printable_area.values.empty())
+        return false;
+
+    Points wipe_tower_corners;
+    if (m_wipe_tower_data.wipe_tower_mesh_data && m_wipe_tower_data.wipe_tower_mesh_data->bottom.points.size() >= 3) {
+        const Vec2d wipe_tower_pos(
+            m_config.wipe_tower_x.get_at(m_plate_index) + m_origin(0),
+            m_config.wipe_tower_y.get_at(m_plate_index) + m_origin(1));
+        wipe_tower_corners.reserve(m_wipe_tower_data.wipe_tower_mesh_data->bottom.points.size());
+        for (const Point &pt : m_wipe_tower_data.wipe_tower_mesh_data->bottom.points) {
+            const Vec2d p = unscale(pt).cast<double>() + wipe_tower_pos;
+            wipe_tower_corners.emplace_back(Point(scale_(p.x()), scale_(p.y())));
+        }
+    } else {
+        wipe_tower_corners = this->first_layer_wipe_tower_corners(false);
+    }
+    if (wipe_tower_corners.empty())
+        return false;
+
+    BoundingBoxf wipe_tower_bbox;
+    Points       wipe_tower_points;
+    for (const Point &pt : wipe_tower_corners) {
+        const Vec2d local_pt = unscale(pt).cast<double>() - Vec2d(m_origin(0), m_origin(1));
+        wipe_tower_bbox.merge(local_pt);
+        wipe_tower_points.emplace_back(scale_(local_pt.x()), scale_(local_pt.y()));
+    }
+    Polygon wipe_tower_hull = Geometry::convex_hull(std::move(wipe_tower_points));
+
+    const Polygon      printable_poly = Polygon::new_scale(m_config.printable_area.values);
+    const BoundingBoxf printable_bbox(m_config.printable_area.values);
+    const double       old_wipe_tower_x = m_config.wipe_tower_x.get_at(m_plate_index);
+    const double       old_wipe_tower_y = m_config.wipe_tower_y.get_at(m_plate_index);
+
+    if (!wipe_tower_bbox.defined || !printable_bbox.defined || wipe_tower_hull.empty() || printable_poly.empty())
+        return false;
+
+    if (wipe_tower_bbox.size().x() > printable_bbox.size().x() + EPSILON ||
+        wipe_tower_bbox.size().y() > printable_bbox.size().y() + EPSILON)
+        return false;
+
+    // Keep the corrected tower slightly inside the printable boundary. Moving it exactly
+    // onto the bed edge may fail the polygon containment check due to clipper precision.
+    constexpr double wipe_tower_clamp_clearance = 0.05;
+    const double clearance_x = std::min(wipe_tower_clamp_clearance, std::max(0., 0.5 * (printable_bbox.size().x() - wipe_tower_bbox.size().x())));
+    const double clearance_y = std::min(wipe_tower_clamp_clearance, std::max(0., 0.5 * (printable_bbox.size().y() - wipe_tower_bbox.size().y())));
+
+    Vec2d offset(0., 0.);
+    if (wipe_tower_bbox.min.x() < printable_bbox.min.x())
+        offset.x() = printable_bbox.min.x() - wipe_tower_bbox.min.x() + clearance_x;
+    else if (wipe_tower_bbox.max.x() > printable_bbox.max.x())
+        offset.x() = printable_bbox.max.x() - wipe_tower_bbox.max.x() - clearance_x;
+
+    if (wipe_tower_bbox.min.y() < printable_bbox.min.y())
+        offset.y() = printable_bbox.min.y() - wipe_tower_bbox.min.y() + clearance_y;
+    else if (wipe_tower_bbox.max.y() > printable_bbox.max.y())
+        offset.y() = printable_bbox.max.y() - wipe_tower_bbox.max.y() - clearance_y;
+
+    if (std::abs(offset.x()) <= EPSILON && std::abs(offset.y()) <= EPSILON)
+        return false;
+
+    Polygon moved_wipe_tower_hull = wipe_tower_hull;
+    moved_wipe_tower_hull.translate(Point::new_scale(offset.x(), offset.y()));
+    Polygons outside = diff(Polygons{moved_wipe_tower_hull}, Polygons{printable_poly});
+    if (!outside.empty())
+        return false;
+
+    {
+        std::scoped_lock lock(m_wipe_tower_position_mutex);
+        m_config.wipe_tower_x.get_at(m_plate_index) += offset.x();
+        m_config.wipe_tower_y.get_at(m_plate_index) += offset.y();
+        m_wipe_tower_position_clamped = true;
+        m_wipe_tower_clamp_original   = Vec2d(old_wipe_tower_x, old_wipe_tower_y);
+        m_wipe_tower_clamp_corrected  = Vec2d(m_config.wipe_tower_x.get_at(m_plate_index), m_config.wipe_tower_y.get_at(m_plate_index));
+        if (ConfigOptionFloats *full_wipe_tower_x = m_full_print_config.option<ConfigOptionFloats>("wipe_tower_x", true))
+            full_wipe_tower_x->values = m_config.wipe_tower_x.values;
+        if (ConfigOptionFloats *full_wipe_tower_y = m_full_print_config.option<ConfigOptionFloats>("wipe_tower_y", true))
+            full_wipe_tower_y->values = m_config.wipe_tower_y.values;
+    }
+
+    return true;
+}
+
 //SoftFever
 Vec2d Print::translate_to_print_space(const Vec2d &point) const {
     //const BoundingBoxf bed_bbox(config().printable_area.values);
@@ -2498,40 +3691,17 @@ Vec2d Print::translate_to_print_space(const Point &point) const {
 
 FilamentTempType Print::get_filament_temp_type(const std::string& filament_type)
 {
-    const static std::string HighTempFilamentStr = "high_temp_filament";
-    const static std::string LowTempFilamentStr = "low_temp_filament";
-    const static std::string HighLowCompatibleFilamentStr = "high_low_compatible_filament";
-    static std::unordered_map<std::string, std::unordered_set<std::string>>filament_temp_type_map;
-
-    if (filament_temp_type_map.empty()) {
-        fs::path file_path = fs::path(resources_dir()) / "info" / "filament_info.json";
-        std::ifstream in(file_path.string());
-        json j;
-        try{
-            j = json::parse(in);
-            in.close();
-            auto&&high_temp_filament_arr =j[HighTempFilamentStr].get < std::vector<std::string>>();
-            filament_temp_type_map[HighTempFilamentStr] = std::unordered_set<std::string>(high_temp_filament_arr.begin(), high_temp_filament_arr.end());
-            auto&& low_temp_filament_arr = j[LowTempFilamentStr].get < std::vector<std::string>>();
-            filament_temp_type_map[LowTempFilamentStr] = std::unordered_set<std::string>(low_temp_filament_arr.begin(), low_temp_filament_arr.end());
-            auto&& high_low_compatible_filament_arr = j[HighLowCompatibleFilamentStr].get < std::vector<std::string>>();
-            filament_temp_type_map[HighLowCompatibleFilamentStr] = std::unordered_set<std::string>(high_low_compatible_filament_arr.begin(), high_low_compatible_filament_arr.end());
-        }
-        catch (const json::parse_error& err){
-            in.close();
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": parse " << file_path.string() << " got a nlohmann::detail::parse_error, reason = " << err.what();
-            filament_temp_type_map[HighTempFilamentStr] = {"ABS","ASA","PC","PA","PA-CF","PA-GF","PA6-CF","PET-CF","PPS","PPS-CF","PPA-GF","PPA-CF","ABS-Aero","ABS-GF"};
-            filament_temp_type_map[LowTempFilamentStr] = {"PLA","TPU","PLA-CF","PLA-AERO","PVA","BVOH","SBS"};
-            filament_temp_type_map[HighLowCompatibleFilamentStr] = { "HIPS","PETG","PCTG","PE","PP","EVA","PE-CF","PP-CF","PP-GF","PHA"};
-        }
+    // Range-based classification only: do not use filament_info.json.
+    int min_temp, max_temp;
+    if (MaterialType::get_temperature_range(filament_type, min_temp, max_temp)) {
+        if (max_temp <= 250)
+            return FilamentTempType::LowTemp;
+        else if (max_temp < 280)
+            return FilamentTempType::HighLowCompatible;
+        else
+            return FilamentTempType::HighTemp;
     }
 
-    if (filament_temp_type_map[HighLowCompatibleFilamentStr].find(filament_type) != filament_temp_type_map[HighLowCompatibleFilamentStr].end())
-        return HighLowCompatible;
-    if (filament_temp_type_map[HighTempFilamentStr].find(filament_type) != filament_temp_type_map[HighTempFilamentStr].end())
-        return HighTemp;
-    if (filament_temp_type_map[LowTempFilamentStr].find(filament_type) != filament_temp_type_map[LowTempFilamentStr].end())
-        return LowTemp;
     return Undefine;
 }
 
@@ -2555,6 +3725,7 @@ int Print::get_hrc_by_nozzle_type(const NozzleType&type)
             nozzle_type_to_hrc = {
                 {"hardened_steel",55},
                 {"stainless_steel",20},
+                {"tungsten_carbide", 85},
                 {"brass",2},
                 {"undefine",0}
             };
@@ -2565,6 +3736,47 @@ int Print::get_hrc_by_nozzle_type(const NozzleType&type)
         return iter->second;
     //0 represents undefine
     return 0;
+}
+
+std::vector<std::string> Print::get_incompatible_filaments_by_nozzle(const float nozzle_diameter, const std::optional<NozzleVolumeType> nozzle_volume_type)
+{
+    static std::map<std::string, std::map<std::string, std::vector<std::string>>> incompatible_filaments;
+    if(incompatible_filaments.empty()){
+        fs::path file_path = fs::path(resources_dir()) / "info" / "nozzle_incompatibles.json";
+        boost::nowide::ifstream in(file_path.string());
+        json j;
+        try {
+            j = json::parse(in);
+            for(auto& [volume_type, diameter_list] : j["incompatible_nozzles"].items()) {
+                for(auto& [diameter, filaments]: diameter_list.items()){
+                    incompatible_filaments[volume_type][diameter] = filaments.get<std::vector<std::string>>();
+                }
+            }
+        }
+        catch(const json::parse_error& err){
+            in.close();
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": parse " << file_path.string() << " got a nlohmann::detail::parse_error, reason = " << err.what();
+
+            incompatible_filaments[get_nozzle_volume_type_string(NozzleVolumeType::nvtHighFlow)] = {};
+            incompatible_filaments[get_nozzle_volume_type_string(NozzleVolumeType::nvtStandard)] = {};
+        }
+    }
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << nozzle_diameter;
+    std::string diameter_str = oss.str();
+
+    if(nozzle_volume_type.has_value()){
+        return incompatible_filaments[get_nozzle_volume_type_string(nozzle_volume_type.value())][diameter_str];
+    }
+
+    std::vector<std::string> incompatible_filaments_list;
+    for(auto& [volume_type, diameter_list] : incompatible_filaments){
+        auto iter = diameter_list.find(diameter_str);
+        if(iter != diameter_list.end()){
+            append(incompatible_filaments_list, iter->second);
+        }
+    }
+    return incompatible_filaments_list;
 }
 
 void Print::finalize_first_layer_convex_hull()
@@ -2579,10 +3791,156 @@ void Print::finalize_first_layer_convex_hull()
     m_first_layer_convex_hull = Geometry::convex_hull(m_first_layer_convex_hull.points);
 }
 
+void Print::update_filament_maps_to_config(std::vector<int>& f_maps)
+{
+    int  extruder_count    = 0;
+    bool different_extruder = m_ori_full_print_config.support_different_extruders(extruder_count);
+    if ((extruder_count > 1 || different_extruder) && extruder_count > 0) {
+        for (size_t idx = 0; idx < f_maps.size(); ++idx) {
+            if (f_maps[idx] < 1 || f_maps[idx] > extruder_count) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": filament_map value %1% for filament %2% is out of printer extruder range [1, %3%], fallback to 1")
+                    % f_maps[idx] % (idx + 1) % extruder_count;
+                f_maps[idx] = 1;
+            }
+        }
+    }
+
+    if (m_config.filament_map.values != f_maps)
+    {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": filament maps changed after pre-slicing.");
+        m_ori_full_print_config.option<ConfigOptionInts>("filament_map", true)->values = f_maps;
+        m_config.filament_map.values = f_maps;
+
+        m_full_print_config = m_ori_full_print_config;
+        m_full_print_config.update_values_to_printer_extruders_for_multiple_filaments(m_full_print_config, filament_options_with_variant,  "filament_self_index", "filament_extruder_variant");
+
+        const std::vector<std::string> &extruder_retract_keys = print_config_def.extruder_retract_keys();
+        const std::string               filament_prefix       = "filament_";
+        t_config_option_keys            print_diff;
+        DynamicPrintConfig              filament_overrides;
+        for (auto& opt_key: extruder_retract_keys)
+        {
+            const ConfigOption *opt_new_filament = m_full_print_config.option(filament_prefix + opt_key);
+            const ConfigOption *opt_new_machine = m_full_print_config.option(opt_key);
+            const ConfigOption *opt_old_machine = m_config.option(opt_key);
+
+            if (opt_new_filament)
+                compute_filament_override_value(opt_key, opt_old_machine, opt_new_machine, opt_new_filament, m_full_print_config, print_diff, filament_overrides, f_maps);
+        }
+
+        t_config_option_keys keys(filament_options_with_variant.begin(), filament_options_with_variant.end());
+        m_config.apply_only(m_full_print_config, keys, true);
+        if (!print_diff.empty()) {
+            m_placeholder_parser.apply_config(filament_overrides);
+            m_config.apply(filament_overrides);
+        }
+    }
+    m_has_auto_filament_map_result = true;
+}
+
+void Print::apply_config_for_render(const DynamicConfig &config)
+{
+    m_config.apply(config);
+}
+
+std::vector<int> Print::get_filament_maps() const
+{
+    return m_config.filament_map.values;
+}
+
+FilamentMapMode Print::get_filament_map_mode() const
+{
+    return m_config.filament_map_mode;
+}
+
+std::vector<std::set<int>> Print::get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const
+{
+    int extruder_num = m_config.nozzle_diameter.size();
+    std::vector<std::set<int>>physical_unprintables(extruder_num);
+    if (extruder_num < 2)
+        return physical_unprintables;
+
+    auto get_unprintable_extruder_id = [&](unsigned int filament_idx) -> int {
+        const unsigned int all_printable =
+            extruder_num >= int(std::numeric_limits<unsigned int>::digits) ?
+            std::numeric_limits<unsigned int>::max() :
+            (1U << unsigned(extruder_num)) - 1U;
+        const unsigned int status = m_config.filament_printable.values.empty() ?
+            all_printable : unsigned(m_config.filament_printable.get_at(filament_idx));
+        for (int i = 0; i < extruder_num; ++i) {
+            if (i >= int(std::numeric_limits<unsigned int>::digits) ||
+                !((status >> unsigned(i)) & 1U)) {
+                return i;
+            }
+        }
+        return -1;
+    };
+
+    for (auto f : used_filaments) {
+        int extruder_id = get_unprintable_extruder_id(f);
+        if (extruder_id == -1)
+            continue;
+        physical_unprintables[extruder_id].insert(f);
+    }
+
+    return physical_unprintables;
+}
+
+
+std::vector<double> Print::get_extruder_printable_height() const
+{
+    return m_config.extruder_printable_height.values;
+}
+
+std::vector<Polygons> Print::get_extruder_printable_polygons() const
+{
+    std::vector<Polygons>           extruder_printable_polys;
+    std::vector<std::vector<Vec2d>> extruder_printable_areas = m_config.extruder_printable_area.values;
+    for (const auto &e_printable_area : extruder_printable_areas) {
+        Polygons ploys = {Polygon::new_scale(e_printable_area)};
+        extruder_printable_polys.emplace_back(ploys);
+    }
+    return std::move(extruder_printable_polys);
+}
+
+std::vector<Polygons> Print::get_extruder_unprintable_polygons() const
+{
+    std::vector<Vec2d>              printable_area           = m_config.printable_area.values;
+    Polygon                         printable_poly           = Polygon::new_scale(printable_area);
+    std::vector<std::vector<Vec2d>> extruder_printable_areas = m_config.extruder_printable_area.values;
+    std::vector<Polygons>           extruder_unprintable_polys;
+    for (const auto &e_printable_area : extruder_printable_areas) {
+        Polygons ploys = diff(printable_poly, Polygon::new_scale(e_printable_area));
+        extruder_unprintable_polys.emplace_back(ploys);
+    }
+    return std::move(extruder_unprintable_polys);
+}
+
+size_t Print::get_extruder_id(unsigned int filament_id) const
+{
+    const size_t nozzle_count = m_config.nozzle_diameter.size();
+    if (nozzle_count <= 1)
+        return 0;
+
+    const std::vector<int> filament_map = get_filament_maps();
+    if (filament_id < filament_map.size() && filament_map[filament_id] >= 1 &&
+        size_t(filament_map[filament_id]) <= nozzle_count)
+        return size_t(filament_map[filament_id] - 1);
+
+    BOOST_LOG_TRIVIAL(debug) << "Print::get_extruder_id using nozzle 0 fallback"
+                             << ", filament_id=" << filament_id
+                             << ", filament_map_size=" << filament_map.size()
+                             << ", nozzle_count=" << nozzle_count;
+    return 0;
+}
+
 // Wipe tower support.
 bool Print::has_wipe_tower() const
 {
     if (m_config.enable_prime_tower.value == true) {
+        if (m_config.enable_wrapping_detection.value && m_config.wrapping_exclude_area.values.size() > 2)
+            return true;
+
         if (enable_timelapse_print())
             return true;
 
@@ -2591,12 +3949,84 @@ bool Print::has_wipe_tower() const
     return false;
 }
 
+Vec2d Print::resolve_wipe_tower_position(const Vec2d &project_position, bool position_clamped,
+                                         const Vec2d &clamp_original, const Vec2d &clamp_corrected)
+{
+    return position_clamped && is_approx(project_position, clamp_original) ? clamp_corrected : project_position;
+}
+
+Vec2d Print::resolve_wipe_tower_position(const Vec2d &project_position) const
+{
+    std::scoped_lock lock(state_mutex(), m_wipe_tower_position_mutex);
+    if (!is_step_done_unguarded(psWipeTower))
+        return project_position;
+
+    if (!m_wipe_tower_position_clamped || m_plate_index < 0 ||
+        m_plate_index >= int(m_config.wipe_tower_x.values.size()) ||
+        m_plate_index >= int(m_config.wipe_tower_y.values.size()))
+        return project_position;
+
+    const Vec2d generated_position(m_config.wipe_tower_x.get_at(m_plate_index),
+                                   m_config.wipe_tower_y.get_at(m_plate_index));
+    if (!is_approx(generated_position, m_wipe_tower_clamp_corrected))
+        return project_position;
+
+    return resolve_wipe_tower_position(project_position, true, m_wipe_tower_clamp_original,
+                                       m_wipe_tower_clamp_corrected);
+}
+
 const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
 {
     // If the wipe tower wasn't created yet, make sure the depth and brim_width members are set to default.
-    if (!is_step_done(psWipeTower) && filaments_cnt != 0) {
+    double max_height = 0;
+    for (size_t obj_idx = 0; obj_idx < m_objects.size(); obj_idx++) {
+        double object_z = (double) m_objects[obj_idx]->size().z();
+        max_height      = std::max(unscale_(object_z), max_height);
+    }
+    if (max_height < EPSILON) return m_wipe_tower_data;
+
+    double layer_height                  = 0.08f; // hard code layer height
+    layer_height        = m_objects.front()->config().layer_height.value;
+
+    auto   timelapse_type  = config().option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
+    bool   need_wipe_tower = (timelapse_type ? (timelapse_type->value == TimelapseType::tlSmooth) : false) | (m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib);
+    double extra_spacing = config().option("prime_tower_infill_gap")->getFloat() / 100.;
+    double rib_width     = config().option("wipe_tower_rib_width")->getFloat();
+
+    double filament_change_volume = 0.;
+    {
+        std::vector<double> filament_change_lengths;
+        auto                filament_change_lengths_opt = config().option<ConfigOptionFloats>("filament_change_length");
+        if (filament_change_lengths_opt) filament_change_lengths = filament_change_lengths_opt->values;
+        double              length   = filament_change_lengths.empty() ? 0 : *std::max_element(filament_change_lengths.begin(), filament_change_lengths.end());
+        double              diameter = 1.75;
+        std::vector<double> diameters;
+        auto                filament_diameter_opt = config().option<ConfigOptionFloats>("filament_diameter");
+        if (filament_diameter_opt) diameters = filament_diameter_opt->values;
+        diameter               = diameters.empty() ? diameter : *std::max_element(diameters.begin(), diameters.end());
+        filament_change_volume = length * PI * diameter * diameter / 4.;
+    }
+
+
+    if (! is_step_done(psWipeTower) && filaments_cnt !=0) {
+        double wipe_volume  = m_config.prime_volume;
+        int filament_depth_count = m_config.nozzle_diameter.values.size() == 2 ? filaments_cnt : filaments_cnt - 1;
+        if (filaments_cnt == 1 && enable_timelapse_print()) filament_depth_count = 1;
+        double volume = wipe_volume * filament_depth_count;
+        if (m_config.nozzle_diameter.values.size() == 2) volume += filament_change_volume * (int) (filaments_cnt / 2);
+
+        if (m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib) {
+            double depth = std::sqrt(volume / layer_height * extra_spacing);
+            if (need_wipe_tower || filaments_cnt > 1) {
+                float min_wipe_tower_depth = WipeTower::get_limit_depth_by_height(max_height);
+                depth  = std::max((double) min_wipe_tower_depth, depth);
+                depth += rib_width / std::sqrt(2) + config().wipe_tower_extra_rib_length.value;
+                const_cast<Print *>(this)->m_wipe_tower_data.depth = depth;
+                const_cast<Print *>(this)->m_wipe_tower_data.brim_width = m_config.prime_tower_brim_width;
+            }
+        }
+        else {
         double width        = m_config.prime_tower_width;
-        double layer_height = 0.2; // hard code layer height
         if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
             // Calculating depth should take into account currently set wiping volumes.
             // For a long time, the initial preview would just use 900/width per toolchange (15mm on a 60mm wide tower)
@@ -2612,16 +4042,17 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
             maximum *= 0.6; 
             const_cast<Print *>(this)->m_wipe_tower_data.depth = maximum / (layer_height * width);
         } else {
-            double wipe_volume = m_config.prime_volume;
-            if (filaments_cnt == 1 && enable_timelapse_print()) {
-                const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume / (layer_height * width);
-            } else {
-                const_cast<Print *>(this)->m_wipe_tower_data.depth = wipe_volume * (filaments_cnt - 1) / (layer_height * width);
+            double depth = volume / (layer_height * width) * extra_spacing;
+            if (need_wipe_tower || m_wipe_tower_data.depth > EPSILON) {
+                float min_wipe_tower_depth = WipeTower::get_limit_depth_by_height(max_height);
+                depth = std::max((double) min_wipe_tower_depth, depth);
             }
+            const_cast<Print *>(this)->m_wipe_tower_data.depth = depth;
         }
         const_cast<Print *>(this)->m_wipe_tower_data.brim_width = m_config.prime_tower_brim_width;
+        }
+        if (m_config.prime_tower_brim_width < 0) const_cast<Print *>(this)->m_wipe_tower_data.brim_width = WipeTower::get_auto_brim_by_height(max_height);
     }
-
     return m_wipe_tower_data;
 }
 
@@ -2634,30 +4065,13 @@ void Print::_make_wipe_tower()
 {
     m_wipe_tower_data.clear();
 
-    // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
-    std::vector<float> flush_matrix(cast<float>(m_config.flush_volumes_matrix.values));
-
     // BBS
-    const unsigned int number_of_extruders = (unsigned int)(sqrt(flush_matrix.size()) + EPSILON);
-    // Extract purging volumes for each extruder pair:
-    std::vector<std::vector<float>> wipe_volumes;
-    for (unsigned int i = 0; i<number_of_extruders; ++i)
-        wipe_volumes.push_back(std::vector<float>(flush_matrix.begin()+i*number_of_extruders, flush_matrix.begin()+(i+1)*number_of_extruders));
+    const unsigned int number_of_extruders = (unsigned int)(m_config.filament_diameter.values.size());
 
-    const auto bUseWipeTower2 = is_BBL_printer() ? false : true;
-    // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume
-    if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && !is_BBL_printer()) {
-        for (unsigned int i = 0; i < number_of_extruders; ++i) {
-            for (unsigned int j = 0; j < number_of_extruders; ++j) {
-                if (wipe_volumes[i][j] > 0) {
-                    wipe_volumes[i][j] = m_config.prime_volume;
-                }
-            }
-        }
-    }
-
+    const bool is_wipe_tower_type2 = this->wipe_tower_type() == WipeTowerType::Type2;
     // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
-    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2 ? true : false);
+    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, is_wipe_tower_type2);
+    m_wipe_tower_data.tool_ordering.sort_and_build_data(*this, (unsigned int)-1, is_wipe_tower_type2);
 
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
@@ -2700,14 +4114,12 @@ void Print::_make_wipe_tower()
     }
     this->throw_if_canceled();
 
-    if (!bUseWipeTower2) {
+    if (!is_wipe_tower_type2) {
         // in BBL machine, wipe tower is only use to prime extruder. So just use a global wipe volume.
-        WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_config.prime_volume, m_wipe_tower_data.tool_ordering.first_extruder(),
-                             m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z);
-
-        // wipe_tower.set_retract();
-        // wipe_tower.set_zhop();
-
+        WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_wipe_tower_data.tool_ordering.first_extruder(),
+                             m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z, m_wipe_tower_data.tool_ordering.all_extruders());
+        wipe_tower.set_has_tpu_filament(this->has_tpu_filament());
+        wipe_tower.set_filament_map(this->get_filament_maps());
         // Set the extruder & material properties at the wipe tower object.
         for (size_t i = 0; i < number_of_extruders; ++i)
             wipe_tower.set_extruder(i, m_config);
@@ -2716,60 +4128,151 @@ void Print::_make_wipe_tower()
         // m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
         //    wipe_tower.prime((float)this->skirt_first_layer_height(), m_wipe_tower_data.tool_ordering.all_extruders(), false));
 
+        std::set<int> used_filament_ids;
+
         // Lets go through the wipe tower layers and determine pairs of extruder changes for each
         // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
         {
-            // BBS: priming logic is removed, so get the initial extruder by first_extruder()
-            unsigned int current_extruder_id = m_wipe_tower_data.tool_ordering.first_extruder();
-            for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
-                if (!layer_tools.has_wipe_tower)
-                    continue;
-                bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
-                wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
-                                           current_extruder_id);
-
-                for (const auto extruder_id : layer_tools.extruders) {
-                    // BBS: priming logic is removed, so no need to do toolchange for first extruder
-                    if (/*(first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || */ extruder_id !=
-                        current_extruder_id) {
-                        float volume_to_purge = wipe_volumes[current_extruder_id][extruder_id];
-                        volume_to_purge *= m_config.flush_multiplier;
-
-                        // Not all of that can be used for infill purging:
-                        // volume_to_purge -= (float)m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
-
-                        // try to assign some infills/objects for the wiping:
-                        volume_to_purge = layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_extruder_id, extruder_id,
-                                                                                                 volume_to_purge);
-
-                        // add back the minimal amount toforce on the wipe tower:
-                        // volume_to_purge += (float)m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
-
-                        // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
-                        wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
-                                                   current_extruder_id, extruder_id, m_config.prime_volume, volume_to_purge);
-                        current_extruder_id = extruder_id;
-                    }
-                }
-                layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
-
-                // if enable timelapse, slice all layer
-                if (enable_timelapse_print()) {
-                    if (layer_tools.wipe_tower_partitions == 0)
-                        wipe_tower.set_last_layer_extruder_fill(false);
-                    continue;
-                }
-
-                if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
-                    break;
+        // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
+        bool               is_mutli_extruder = m_config.nozzle_diameter.values.size() > 1;
+        size_t nozzle_nums = m_config.nozzle_diameter.values.size();
+        if (nozzle_nums == 0)
+            nozzle_nums = 1;
+        using FlushMatrix = std::vector<std::vector<float>>;
+        std::vector<FlushMatrix> multi_extruder_flush;
+        for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id) {
+            std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, nozzle_id, nozzle_nums)));
+            const size_t expected_flush_values = size_t(number_of_extruders) * number_of_extruders;
+            if (flush_matrix.size() < expected_flush_values) {
+                BOOST_LOG_TRIVIAL(warning) << "Short flush matrix; using prime-volume fallback"
+                                           << ", context=wipe_tower_type1"
+                                           << ", nozzle=" << nozzle_id
+                                           << ", matrix_size=" << flush_matrix.size()
+                                           << ", expected_size=" << expected_flush_values;
+                flush_matrix.assign(expected_flush_values, float(m_config.prime_volume.value));
             }
+            std::vector<std::vector<float>> wipe_volumes;
+            for (unsigned int i = 0; i < number_of_extruders; ++i)
+                wipe_volumes.push_back(std::vector<float>(flush_matrix.begin() + i * number_of_extruders, flush_matrix.begin() + (i + 1) * number_of_extruders));
+
+            multi_extruder_flush.emplace_back(wipe_volumes);
         }
+
+        std::vector<int>filament_maps = get_filament_maps();
+        auto safe_nozzle_id = [&filament_maps, nozzle_nums](unsigned int filament_id) -> size_t {
+            if (filament_id >= filament_maps.size()) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": invalid filament id " << filament_id
+                                           << ", filament_map size=" << filament_maps.size();
+                return 0;
+            }
+
+            const int mapped_nozzle = filament_maps[filament_id];
+            if (mapped_nozzle < 1 || static_cast<size_t>(mapped_nozzle) > nozzle_nums) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": invalid filament_map value " << mapped_nozzle
+                                           << ", nozzle count=" << nozzle_nums << ", fallback to 1";
+                return 0;
+            }
+
+            return static_cast<size_t>(mapped_nozzle - 1);
+        };
+
+        std::vector<unsigned int> nozzle_cur_filament_ids(nozzle_nums, -1);
+        unsigned int current_filament_id = m_wipe_tower_data.tool_ordering.first_extruder();
+        size_t cur_nozzle_id = safe_nozzle_id(current_filament_id);
+        nozzle_cur_filament_ids[cur_nozzle_id] = current_filament_id;
+        std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print;
+        if (m_config.dithering_local_z_mode)
+            layers_to_print = GCode::collect_layers_to_print(*this);
+        size_t layers_to_print_idx = 0;
+
+        for (auto& layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
+            if (!layer_tools.has_wipe_tower) continue;
+            while (layers_to_print_idx + 1 < layers_to_print.size() &&
+                   layers_to_print[layers_to_print_idx].first + EPSILON < layer_tools.print_z) {
+                ++layers_to_print_idx;
+            }
+
+            const std::vector<GCode::LayerToPrint> *layers_with_same_print_z = nullptr;
+            if (layers_to_print_idx < layers_to_print.size() &&
+                std::abs(layers_to_print[layers_to_print_idx].first - layer_tools.print_z) <= EPSILON) {
+                layers_with_same_print_z = &layers_to_print[layers_to_print_idx].second;
+            }
+
+            // Type 1 emits Local-Z changes directly instead of drawing them on
+            // the tower. Still advance the planning state through the exact
+            // Local-Z sequence before generating nominal tower toolchanges.
+            if (m_config.dithering_local_z_mode && layers_with_same_print_z != nullptr) {
+                const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
+                    collect_local_z_wipe_tower_toolchanges(*this, *layers_with_same_print_z, int(current_filament_id));
+                for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
+                    current_filament_id = toolchange.new_tool;
+                    used_filament_ids.insert(toolchange.old_tool);
+                    used_filament_ids.insert(toolchange.new_tool);
+
+                    const size_t nozzle_id = safe_nozzle_id(current_filament_id);
+                    nozzle_cur_filament_ids[nozzle_id] = current_filament_id;
+                }
+            }
+
+            const std::vector<unsigned int> nominal_layer_filaments =
+                rotate_extruders_to_start_with(layer_tools.extruders, current_filament_id);
+            wipe_tower.plan_toolchange((float)layer_tools.print_z, (float)layer_tools.wipe_tower_layer_height, current_filament_id, current_filament_id);
+
+            used_filament_ids.insert(layer_tools.extruders.begin(), layer_tools.extruders.end());
+
+            for (const auto filament_id : nominal_layer_filaments) {
+                if (filament_id == current_filament_id)
+                    continue;
+
+                size_t       nozzle_id = safe_nozzle_id(filament_id);
+                unsigned int pre_filament_id = nozzle_cur_filament_ids[nozzle_id];
+
+                float volume_to_purge = 0;
+                if (pre_filament_id != (unsigned int)(-1) && pre_filament_id != filament_id) {
+                    volume_to_purge = multi_extruder_flush[nozzle_id][pre_filament_id][filament_id];
+                    volume_to_purge *= m_config.flush_multiplier.get_at(nozzle_id);
+                    volume_to_purge = pre_filament_id == -1 ? 0 :
+                        layer_tools.wiping_extrusions().mark_wiping_extrusions(*this, current_filament_id, filament_id, volume_to_purge);
+                }
+
+                //During the filament change, the extruder will extrude an extra length of grab_length for the corresponding detection, so the purge can reduce this length.
+                float grab_purge_volume = m_config.grab_length.get_at(nozzle_id) * 2.4; //(diameter/2)^2*PI=2.4
+                volume_to_purge = std::max(0.f, volume_to_purge - grab_purge_volume);
+
+                wipe_tower.plan_toolchange((float)layer_tools.print_z, (float)layer_tools.wipe_tower_layer_height, current_filament_id, filament_id,
+                    m_config.prime_volume, volume_to_purge);
+                current_filament_id = filament_id;
+                nozzle_cur_filament_ids[nozzle_id] = filament_id;
+            }
+            layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
+
+            // if enable timelapse, slice all layer
+            if (m_config.enable_wrapping_detection || enable_timelapse_print()) {
+                if (layer_tools.wipe_tower_partitions == 0) wipe_tower.set_last_layer_extruder_fill(false);
+                continue;
+            }
+
+            if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
+                break;
+        }
+        }
+
+        wipe_tower.set_used_filament_ids(std::vector<int>(used_filament_ids.begin(), used_filament_ids.end()));
+
+        std::vector<int> categories;
+        for (size_t i = 0; i < m_config.filament_adhesiveness_category.values.size(); ++i) {
+            categories.push_back(m_config.filament_adhesiveness_category.get_at(i));
+        }
+        wipe_tower.set_filament_categories(categories);
 
         // Generate the wipe tower layers.
         m_wipe_tower_data.tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
-        wipe_tower.generate(m_wipe_tower_data.tool_changes);
+        wipe_tower.generate_new(m_wipe_tower_data.tool_changes);
         m_wipe_tower_data.depth      = wipe_tower.get_depth();
         m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
+        m_wipe_tower_data.height     = wipe_tower.get_height();
+        m_wipe_tower_data.bbx = wipe_tower.get_bbx();
+        m_wipe_tower_data.rib_offset = wipe_tower.get_rib_offset();
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
@@ -2792,14 +4295,45 @@ void Print::_make_wipe_tower()
 
         m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
         m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
+        m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_height(), wipe_tower.get_brim_width(), config().wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
+                                         wipe_tower.get_rib_width(), wipe_tower.get_rib_length(), config().wipe_tower_fillet_wall.value);
         const Vec3d origin                      = this->get_plate_origin();
-        m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_height(),
-                                                  wipe_tower.get_layer_height(), m_wipe_tower_data.depth, m_wipe_tower_data.brim_width,
-                                                  {scale_(origin.x()), scale_(origin.y())});
+        m_fake_wipe_tower.rib_offset = wipe_tower.get_rib_offset();
+        m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position() + m_fake_wipe_tower.rib_offset, wipe_tower.width(), wipe_tower.get_height(), wipe_tower.get_layer_height(),
+                                                  m_wipe_tower_data.depth,
+                                                  m_wipe_tower_data.brim_width, {scale_(origin.x()), scale_(origin.y())});
+        m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
     } else {
+        // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
+        std::vector<float> flush_matrix(cast<float>(m_config.flush_volumes_matrix.values));
+        const size_t expected_flush_values = size_t(number_of_extruders) * number_of_extruders;
+        if (flush_matrix.size() < expected_flush_values) {
+            BOOST_LOG_TRIVIAL(warning) << "Short flush matrix; using prime-volume fallback"
+                                       << ", context=wipe_tower_type2"
+                                       << ", matrix_size=" << flush_matrix.size()
+                                       << ", expected_size=" << expected_flush_values;
+            flush_matrix.assign(expected_flush_values, float(m_config.prime_volume.value));
+        }
+        // Extract purging volumes for each extruder pair:
+        std::vector<std::vector<float>> wipe_volumes;
+        for (unsigned int i = 0; i<number_of_extruders; ++i)
+            wipe_volumes.push_back(std::vector<float>(flush_matrix.begin()+i*number_of_extruders, flush_matrix.begin()+(i+1)*number_of_extruders));
+
+        // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume
+        if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && is_wipe_tower_type2) {
+            for (unsigned int i = 0; i < number_of_extruders; ++i) {
+                for (unsigned int j = 0; j < number_of_extruders; ++j) {
+                    if (wipe_volumes[i][j] > 0) {
+                        wipe_volumes[i][j] = m_config.prime_volume;
+                    }
+                }
+            }
+        }
         // Initialize the wipe tower.
         WipeTower2 wipe_tower(m_config, m_default_region_config, m_plate_index, m_origin, wipe_volumes,
                               m_wipe_tower_data.tool_ordering.first_extruder());
+        const std::vector<std::pair<coordf_t, std::vector<GCode::LayerToPrint>>> layers_to_print = GCode::collect_layers_to_print(*this);
+        size_t layers_to_print_idx = 0;
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
@@ -2818,16 +4352,58 @@ void Print::_make_wipe_tower()
             for (auto &layer_tools : m_wipe_tower_data.tool_ordering.layer_tools()) { // for all layers
                 if (!layer_tools.has_wipe_tower)
                     continue;
+                while (layers_to_print_idx + 1 < layers_to_print.size() &&
+                       layers_to_print[layers_to_print_idx].first + EPSILON < layer_tools.print_z) {
+                    ++layers_to_print_idx;
+                }
+
+                const std::vector<GCode::LayerToPrint> *layers_with_same_print_z = nullptr;
+                if (layers_to_print_idx < layers_to_print.size() &&
+                    std::abs(layers_to_print[layers_to_print_idx].first - layer_tools.print_z) <= EPSILON) {
+                    layers_with_same_print_z = &layers_to_print[layers_to_print_idx].second;
+                }
+
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
+
+                if (m_config.dithering_local_z_mode && layers_with_same_print_z != nullptr) {
+                    const std::vector<LocalZWipeTowerToolchange> local_z_toolchanges =
+                        collect_local_z_wipe_tower_toolchanges(*this, *layers_with_same_print_z, int(current_extruder_id));
+                    if (!local_z_toolchanges.empty()) {
+                        std::ostringstream local_z_sequence;
+                        for (size_t toolchange_idx = 0; toolchange_idx < local_z_toolchanges.size(); ++toolchange_idx) {
+                            if (toolchange_idx != 0)
+                                local_z_sequence << ",";
+                            local_z_sequence << local_z_toolchanges[toolchange_idx].old_tool << "->"
+                                             << local_z_toolchanges[toolchange_idx].new_tool;
+                        }
+
+                        BOOST_LOG_TRIVIAL(debug) << "Local-Z wipe tower preplan"
+                                                 << " print_z=" << layer_tools.print_z
+                                                 << " start_tool=" << current_extruder_id
+                                                 << " nominal_toolchanges=" << layer_tools.extruders.size()
+                                                 << " local_z_toolchanges=" << local_z_toolchanges.size()
+                                                 << " sequence=" << local_z_sequence.str();
+                    }
+                    for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
+                        wipe_tower.plan_local_z_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
+                                                           toolchange.old_tool, toolchange.new_tool, (float) m_config.prime_volume);
+                    }
+                    if (!local_z_toolchanges.empty())
+                        current_extruder_id = local_z_toolchanges.back().new_tool;
+                }
+
+                const std::vector<unsigned int> nominal_layer_extruders =
+                    rotate_extruders_to_start_with(layer_tools.extruders, current_extruder_id);
+
                 wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id, false);
-                for (const auto extruder_id : layer_tools.extruders) {
+                for (const auto extruder_id : nominal_layer_extruders) {
                     if ((first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || extruder_id !=
                         current_extruder_id) {
                         float volume_to_wipe = m_config.prime_volume;
                         if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
                             volume_to_wipe = wipe_volumes[current_extruder_id][extruder_id]; // total volume to wipe after this toolchange
-                            volume_to_wipe *= m_config.flush_multiplier;
+                            volume_to_wipe *= m_config.flush_multiplier.get_at(0);
                             // Not all of that can be used for infill purging:
                             volume_to_wipe -= (float) m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
 
@@ -2846,6 +4422,18 @@ void Print::_make_wipe_tower()
                     }
                 }
                 layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
+
+                // Reserve Local-Z wipe-tower slots for unplanned toolchanges during Local-Z sub-layer emission.
+                if (m_config.dithering_local_z_mode) {
+                    size_t local_z_reserve_slots = 0;
+                    for (const PrintObject* print_object : m_objects)
+                        local_z_reserve_slots += estimate_local_z_wipe_tower_reserve_slots(*print_object, layer_tools.print_z);
+                    if (local_z_reserve_slots > 0) {
+                        wipe_tower.plan_local_z_reserve((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
+                                                        local_z_reserve_slots, (float) m_config.prime_volume);
+                    }
+                }
+
                 if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
                     break;
             }
@@ -2853,11 +4441,18 @@ void Print::_make_wipe_tower()
 
         // Generate the wipe tower layers.
         m_wipe_tower_data.tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
-        wipe_tower.generate(m_wipe_tower_data.tool_changes);
+        m_wipe_tower_data.local_z_tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
+        wipe_tower.generate(m_wipe_tower_data.tool_changes, m_wipe_tower_data.local_z_tool_changes);
+        BOOST_LOG_TRIVIAL(debug) << "Wipe tower generation completed"
+                                 << " nominal_layers=" << m_wipe_tower_data.tool_changes.size()
+                                 << " local_z_layers=" << m_wipe_tower_data.local_z_tool_changes.size();
         m_wipe_tower_data.depth             = wipe_tower.get_depth();
         m_wipe_tower_data.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
         m_wipe_tower_data.brim_width        = wipe_tower.get_brim_width();
         m_wipe_tower_data.height            = wipe_tower.get_wipe_tower_height();
+        m_wipe_tower_data.bbx               = wipe_tower.get_bbx();
+        m_wipe_tower_data.rib_offset        = wipe_tower.get_rib_offset();
+        m_wipe_tower_data.local_z_reserve_boxes = wipe_tower.get_local_z_reserve_boxes();
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
@@ -2880,6 +4475,11 @@ void Print::_make_wipe_tower()
 
         m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
         m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
+        m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(),
+                                         wipe_tower.get_wipe_tower_height(), wipe_tower.get_brim_width(),
+                                         config().wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
+                                         wipe_tower.get_rib_width(), wipe_tower.get_rib_length(),
+                                         config().wipe_tower_fillet_wall.value);
         const Vec3d origin                      = Vec3d::Zero();
         m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_wipe_tower_height(),
                                                   config().initial_layer_print_height, m_wipe_tower_data.depth,
@@ -2902,6 +4502,24 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_name", new ConfigOptionString(get_plate_name()));
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
+
+    // the same type of filament contains multiple names, support exporting according to the filament name
+    auto full_print_config = this->full_print_config();
+    const ConfigOptionStrings* filament_settings_id = full_print_config.option<ConfigOptionStrings>("filament_settings_id");
+    std::string filament_name = "";
+    auto extruders = this->extruders(true);
+    if(!extruders.empty()) {
+        // first extruder is the default extruder
+        int extruder_id = extruders.front();
+        if(filament_settings_id->values.size() > extruder_id) {
+            filament_name = filament_settings_id->values[extruder_id];
+        }
+    }
+    size_t end_pos = filament_name.find_first_of("@");
+    if (end_pos != std::string::npos) {
+        filament_name = filament_name.substr(0, end_pos);
+    }
+    config.set_key_value("filament_name", new ConfigOptionString(filament_name));
 
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
 }
@@ -2961,7 +4579,7 @@ void Print::export_gcode_from_previous_file(const std::string& file, GCodeProces
 
 std::tuple<float, float> Print::object_skirt_offset(double margin_height) const
 {
-    if (config().skirt_loops == 0 || config().skirt_type != stPerObject)
+    if (config().skirt_loops == 0 || config().skirt_type != stPerObject || m_objects.empty())
         return std::make_tuple(0, 0);
     
     float max_nozzle_diameter = *std::max_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end());
@@ -2995,9 +4613,12 @@ DynamicConfig PrintStatistics::config() const
     config.set_key_value("total_cost",                new ConfigOptionFloat(this->total_cost));
     config.set_key_value("total_toolchanges",         new ConfigOptionInt(this->total_toolchanges));
     config.set_key_value("total_weight",              new ConfigOptionFloat(this->total_weight));
+    config.set_key_value("extruded_weight_total",     new ConfigOptionFloat(this->total_weight));
+    config.set_key_value("extruded_volume_total",     new ConfigOptionFloat(this->total_extruded_volume));
     config.set_key_value("total_wipe_tower_cost",     new ConfigOptionFloat(this->total_wipe_tower_cost));
     config.set_key_value("total_wipe_tower_filament", new ConfigOptionFloat(this->total_wipe_tower_filament));
     config.set_key_value("initial_tool",              new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_extruder",          new ConfigOptionInt(static_cast<int>(this->initial_tool)));
     return config;
 }
 
@@ -3006,8 +4627,8 @@ DynamicConfig PrintStatistics::placeholders()
     DynamicConfig config;
     for (const std::string key : {
         "print_time", "normal_print_time", "silent_print_time",
-        "used_filament", "extruded_volume", "total_cost", "total_weight",
-        "initial_tool", "total_toolchanges", "total_wipe_tower_cost", "total_wipe_tower_filament"})
+        "used_filament", "extruded_volume", "extruded_volume_total", "total_cost", "total_weight", "extruded_weight_total",
+        "initial_tool", "initial_extruder", "total_toolchanges", "total_wipe_tower_cost", "total_wipe_tower_filament"})
         config.set_key_value(key, new ConfigOptionString(std::string("{") + key + "}"));
     return config;
 }
@@ -3170,8 +4791,6 @@ const std::string PrintStatistics::TotalFilamentUsedWipeTowerValueMask = "; tota
 #define JSON_EXTRUSION_TYPE_LOOP               "loop"
 #define JSON_EXTRUSION_TYPE_COLLECTION         "collection"
 #define JSON_EXTRUSION_POLYLINE                "polyline"
-#define JSON_EXTRUSION_OVERHANG_DEGREE         "overhang_degree"
-#define JSON_EXTRUSION_CURVE_DEGREE            "curve_degree"
 #define JSON_EXTRUSION_MM3_PER_MM              "mm3_per_mm"
 #define JSON_EXTRUSION_WIDTH                   "width"
 #define JSON_EXTRUSION_HEIGHT                  "height"
@@ -3265,8 +4884,6 @@ static void to_json(json& j, const Polyline& poly_line) {
 
 static void to_json(json& j, const ExtrusionPath& extrusion_path) {
     j[JSON_EXTRUSION_POLYLINE] = extrusion_path.polyline;
-    j[JSON_EXTRUSION_OVERHANG_DEGREE] = extrusion_path.overhang_degree;
-    j[JSON_EXTRUSION_CURVE_DEGREE] = extrusion_path.curve_degree;
     j[JSON_EXTRUSION_MM3_PER_MM] = extrusion_path.mm3_per_mm;
     j[JSON_EXTRUSION_WIDTH] = extrusion_path.width;
     j[JSON_EXTRUSION_HEIGHT] = extrusion_path.height;
@@ -3542,9 +5159,8 @@ static void from_json(const json& j, Polyline& poly_line) {
 }
 
 static void from_json(const json& j, ExtrusionPath& extrusion_path) {
-    extrusion_path.polyline               =    j[JSON_EXTRUSION_POLYLINE];
-    extrusion_path.overhang_degree        =    j[JSON_EXTRUSION_OVERHANG_DEGREE];
-    extrusion_path.curve_degree           =    j[JSON_EXTRUSION_CURVE_DEGREE];
+    Polyline temp_polyline = j[JSON_EXTRUSION_POLYLINE];
+    extrusion_path.polyline = Polyline3(temp_polyline);
     extrusion_path.mm3_per_mm             =    j[JSON_EXTRUSION_MM3_PER_MM];
     extrusion_path.width                  =    j[JSON_EXTRUSION_WIDTH];
     extrusion_path.height                 =    j[JSON_EXTRUSION_HEIGHT];
@@ -3654,7 +5270,7 @@ static void convert_layer_region_from_json(const json& j, LayerRegion& layer_reg
         if (!ret) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":error parsing thin_fills found at layer %1%, print_z %2%") %layer_region.layer()->id() %layer_region.layer()->print_z;
             char error_buf[1024];
-            ::sprintf(error_buf, "Error while parsing thin_fills at layer %zd, print_z %f", layer_region.layer()->id(), layer_region.layer()->print_z);
+            ::sprintf(error_buf, "Error while parsing thin_fills at layer %zu, print_z %f", layer_region.layer()->id(), layer_region.layer()->print_z);
             throw Slic3r::FileIOError(error_buf);
         }
     }
@@ -3709,7 +5325,7 @@ static void convert_layer_region_from_json(const json& j, LayerRegion& layer_reg
         if (!ret) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": error parsing perimeters found at layer %1%, print_z %2%") %layer_region.layer()->id() %layer_region.layer()->print_z;
             char error_buf[1024];
-            ::sprintf(error_buf, "Error while parsing perimeters at layer %zd, print_z %f", layer_region.layer()->id(), layer_region.layer()->print_z);
+            ::sprintf(error_buf, "Error while parsing perimeters at layer %zu, print_z %f", layer_region.layer()->id(), layer_region.layer()->print_z);
             throw Slic3r::FileIOError(error_buf);
         }
     }
@@ -3724,7 +5340,7 @@ static void convert_layer_region_from_json(const json& j, LayerRegion& layer_reg
         if (!ret) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": error parsing fills found at layer %1%, print_z %2%") %layer_region.layer()->id() %layer_region.layer()->print_z;
             char error_buf[1024];
-            ::sprintf(error_buf, "Error while parsing fills at layer %zd, print_z %f", layer_region.layer()->id(), layer_region.layer()->print_z);
+            ::sprintf(error_buf, "Error while parsing fills at layer %zu, print_z %f", layer_region.layer()->id(), layer_region.layer()->print_z);
             throw Slic3r::FileIOError(error_buf);
         }
     }
@@ -3805,7 +5421,7 @@ void extract_support_layer(const json& support_layer_json, SupportLayer& support
         if (!ret) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": error parsing fills found at support_layer %1%, print_z %2%")%support_layer.id() %support_layer.print_z;
             char error_buf[1024];
-            ::sprintf(error_buf, "Error while parsing fills at support_layer %zd, print_z %f", support_layer.id(), support_layer.print_z);
+            ::sprintf(error_buf, "Error while parsing fills at support_layer %zu, print_z %f", support_layer.id(), support_layer.print_z);
             throw Slic3r::FileIOError(error_buf);
         }
     }
@@ -4063,7 +5679,7 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
             /*boost::nowide::ofstream c;
             c.open(file_name, std::ios::out | std::ios::trunc);
             if (with_space)
-                c << std::setw(4) << root_json << std::endl;
+                c << root_json.dump(1, '\t') << std::endl;
             else
                 c << root_json.dump(0) << std::endl;
             c.close();*/
@@ -4085,7 +5701,7 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
                     boost::nowide::ofstream c;
                     c.open(filename_vector[object_index], std::ios::out | std::ios::trunc);
                     if (with_space)
-                        c << std::setw(4) << json_vector[object_index] << std::endl;
+                        c << json_vector[object_index].dump(1, '\t') << std::endl;
                     else
                         c << json_vector[object_index].dump(0) << std::endl;
                     c.close();
@@ -4320,7 +5936,7 @@ int Print::load_cached_data(const std::string& directory)
     return ret;
 }
 
-BoundingBoxf3 PrintInstance::get_bounding_box() {
+BoundingBoxf3 PrintInstance::get_bounding_box() const {
     return print_object->model_object()->instance_bounding_box(*model_instance, false);
 }
 
@@ -4336,6 +5952,103 @@ Point PrintInstance::shift_without_plate_offset() const
     const Print* print = print_object->print();
     const Vec3d plate_offset = print->get_plate_origin();
     return shift - Point(scaled(plate_offset.x()), scaled(plate_offset.y()));
+}
+
+PrintRegion *PrintObjectRegions::FuzzySkinPaintedRegion::parent_print_object_region(const LayerRangeRegions &layer_range) const
+{
+    using FuzzySkinParentType = PrintObjectRegions::FuzzySkinPaintedRegion::ParentType;
+
+    if (this->parent_type == FuzzySkinParentType::PaintedRegion) {
+        return layer_range.painted_regions[this->parent].region;
+    }
+
+    assert(this->parent_type == FuzzySkinParentType::VolumeRegion);
+    return layer_range.volume_regions[this->parent].region;
+}
+
+int PrintObjectRegions::FuzzySkinPaintedRegion::parent_print_object_region_id(const LayerRangeRegions &layer_range) const
+{
+    return this->parent_print_object_region(layer_range)->print_object_region_id();
+}
+
+ExtrusionLayers FakeWipeTower::getTrueExtrusionLayersFromWipeTower() const
+{
+    ExtrusionLayers wtels;
+    wtels.type = ExtrusionLayersType::WIPE_TOWER;
+
+    //ORCA: Fallback for WipeTower2 if outer_wall is empty
+    if (outer_wall.empty()) {
+        auto fake_paths = getFakeExtrusionPathsFromWipeTower2();
+        float current_z = 0.f;
+        for (auto& layer_paths : fake_paths) {
+            if (layer_paths.empty()) continue;
+            ExtrusionLayer el;
+            float lh = layer_paths.front().height;
+            el.height = lh;
+            el.bottom_z = current_z;
+            el.layer = nullptr;
+            el.paths = std::move(layer_paths);
+            wtels.push_back(std::move(el));
+            current_z += lh;
+        }
+        return wtels;
+    }
+
+    std::vector<float> layer_heights;
+    layer_heights.reserve(outer_wall.size());
+    auto pre = outer_wall.begin();
+    for (auto it = outer_wall.begin(); it != outer_wall.end(); ++it) {
+        if (it == outer_wall.begin())
+            layer_heights.push_back(it->first);
+        else {
+            layer_heights.push_back(it->first - pre->first);
+            ++pre;
+        }
+    }
+    Point trans = {scale_(pos.x()), scale_(pos.y())};
+    for (auto it = outer_wall.begin(); it != outer_wall.end(); ++it) {
+        int            index = std::distance(outer_wall.begin(), it);
+        ExtrusionLayer el;
+        ExtrusionPaths paths;
+        paths.reserve(it->second.size());
+        for (auto &polyline : it->second) {
+            ExtrusionPath path(ExtrusionRole::erWipeTower, 0.0, 0.0, layer_heights[index]);
+            path.polyline = Polyline3(polyline);
+            Point3 trans3(trans, 0);
+            for (auto &p : path.polyline.points) p += trans3;
+            paths.push_back(path);
+        }
+        el.paths    = std::move(paths);
+        el.bottom_z = it->first - layer_heights[index];
+        el.layer    = nullptr;
+        wtels.push_back(el);
+    }
+    return wtels;
+}
+void WipeTowerData::construct_mesh(float width, float depth, float height, float brim_width, bool is_rib_wipe_tower, float rib_width, float rib_length,bool fillet_wall)
+{
+    wipe_tower_mesh_data = WipeTowerMeshData{};
+    float first_layer_height=0.08; //brim height
+    if (width < EPSILON || depth < EPSILON || height < EPSILON) return;
+    if (!is_rib_wipe_tower || rib_length < EPSILON) {
+        wipe_tower_mesh_data->real_wipe_tower_mesh = make_cube(width, depth, height);
+        wipe_tower_mesh_data->real_brim_mesh       = make_cube(width + 2 * brim_width, depth + 2 * brim_width, first_layer_height);
+        wipe_tower_mesh_data->real_brim_mesh.translate({-brim_width, -brim_width, 0});
+        wipe_tower_mesh_data->bottom = {scaled(Vec2f{-brim_width, -brim_width}), scaled(Vec2f{width + brim_width, -brim_width}), scaled(Vec2f{width + brim_width, depth + brim_width}),
+                                        scaled(Vec2f{-brim_width, depth + brim_width})};
+    } else {
+        wipe_tower_mesh_data->real_wipe_tower_mesh = WipeTower::its_make_rib_tower(width, depth, height, rib_length, rib_width, fillet_wall);
+        wipe_tower_mesh_data->bottom               = WipeTower::rib_section(width, depth, rib_length, rib_width, fillet_wall);
+        auto brim_bottom                           = offset(wipe_tower_mesh_data->bottom, scaled(brim_width));
+        if (!brim_bottom.empty())
+            wipe_tower_mesh_data->bottom               = brim_bottom.front();
+        wipe_tower_mesh_data->real_brim_mesh       = WipeTower::its_make_rib_brim(wipe_tower_mesh_data->bottom, first_layer_height);
+        wipe_tower_mesh_data->real_wipe_tower_mesh.translate(Vec3f(rib_offset[0], rib_offset[1],0));
+        wipe_tower_mesh_data->real_brim_mesh.translate(Vec3f(rib_offset[0], rib_offset[1], 0));
+        wipe_tower_mesh_data->bottom.translate(scaled(Vec2f(rib_offset[0], rib_offset[1])));
+    }
+    //wipe_tower_mesh_data->real_wipe_tower_mesh.write_ascii("../wipe_tower_mesh.obj");
+   //wipe_tower_mesh_data->real_brim_mesh.write_ascii("../wipe_tower_brim_mesh.obj");
 }
 
 } // namespace Slic3r

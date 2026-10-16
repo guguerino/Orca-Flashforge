@@ -2,6 +2,7 @@
 #include <boost/log/trivial.hpp>
 #include <wx/graphics.h>
 #include <wx/event.h>
+#include <wx/dcclient.h>
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/FFUtils.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -17,6 +18,27 @@
 namespace Slic3r {
 namespace GUI {
 
+namespace {
+
+constexpr auto FF_DEVICE_LIST_PRIMARY_TEXT   = "#262E30";
+constexpr auto FF_DEVICE_LIST_SECONDARY_TEXT = "#6B6B6B";
+constexpr auto FF_DEVICE_LIST_MUTED_TEXT     = "#909090";
+
+void apply_light_mode_text(wxWindow* window, const wxColour& color)
+{
+#ifdef __APPLE__
+    if (!window) {
+        return;
+    }
+    window->SetForegroundColour(color);
+#else
+    (void) window;
+    (void) color;
+#endif
+}
+
+}
+
 DropDownButton::DropDownButton(wxWindow* parent/*=nullptr*/, const wxString& text/*=wxEmptyString*/, const wxBitmap& bitmap/*=wxNullBitmap*/)
     : wxPanel(parent)
 {
@@ -25,6 +47,7 @@ DropDownButton::DropDownButton(wxWindow* parent/*=nullptr*/, const wxString& tex
         SetBackgroundColour(parent->GetBackgroundColour());
     }
     m_text = new wxStaticText(this, wxID_ANY, text, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    apply_light_mode_text(m_text, wxColour(FF_DEVICE_LIST_PRIMARY_TEXT));
     //m_text->FitInside();
     m_text->Fit();
     m_bitmap = new wxStaticBitmap(this, wxID_ANY, bitmap, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
@@ -260,6 +283,7 @@ DeviceInfoItemPanel::DeviceInfoItemPanel(wxWindow *parent, const DeviceInfo& inf
     Freeze();
     m_name_text = new wxStaticText(this, wxID_ANY, wxT("AD5M"));
     m_name_text->SetBackgroundColour(m_bg_color);
+    apply_light_mode_text(m_name_text, wxColour(FF_DEVICE_LIST_PRIMARY_TEXT));
     m_icon = new wxStaticBitmap(this, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxSize(FromDIP(112), FromDIP(112)), wxALIGN_LEFT);
     m_icon->SetMinSize(wxSize(FromDIP(112), FromDIP(112)));
     m_icon->SetMaxSize(wxSize(FromDIP(112), FromDIP(112)));
@@ -271,13 +295,32 @@ DeviceInfoItemPanel::DeviceInfoItemPanel(wxWindow *parent, const DeviceInfo& inf
     m_exit_btn->SetMinSize(wxSize(FromDIP(20), FromDIP(20)));
     m_exit_btn->SetMaxSize(wxSize(FromDIP(20), FromDIP(20)));
     m_exit_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& event) {
-        DeviceObjectOpr* devOpr = wxGetApp().getDeviceObjectOpr();
-        if (!devOpr)
+        if (m_unbinding) {
             return;
+        }
+
+        m_unbinding = true;
+        m_exit_btn->Enable(false);
+        auto restore_unbind_button = [this]() {
+            m_unbinding = false;
+            if (m_exit_btn) {
+                m_exit_btn->Enable(true);
+            }
+        };
+
+        DeviceObjectOpr* devOpr = wxGetApp().getDeviceObjectOpr();
+        if (!devOpr) {
+            restore_unbind_button();
+            return;
+        }
         std::map<std::string, DeviceObject*> list;
         list.clear();
         devOpr->get_my_machine_list(list);
         auto it = list.find(m_dev_id);
+        if (it == list.end() || it->second == nullptr) {
+            restore_unbind_button();
+            return;
+        }
         if (m_info.lanFlag) {
             MessageDialog msg_wingow(nullptr, _L("Are you sure to unbind this device?"), _L("Question"), wxYES_NO);
             if (wxID_YES == msg_wingow.ShowModal()) {
@@ -290,6 +333,8 @@ DeviceInfoItemPanel::DeviceInfoItemPanel(wxWindow *parent, const DeviceInfo& inf
                 if (msg_wingow1.ShowModal() == wxOK) {
                     return;
                 }
+            } else {
+                restore_unbind_button();
             }
 #ifdef __APPLE__
             SelectMachinePopup::m_wan_bind_enable = false;
@@ -298,7 +343,9 @@ DeviceInfoItemPanel::DeviceInfoItemPanel(wxWindow *parent, const DeviceInfo& inf
             BindInfo*           info = it->second->get_bind_info();
             UnBindMachineDialog dlg;
             dlg.update_device_info2(info);
-            dlg.ShowModal();
+            if (dlg.ShowModal() != wxID_OK) {
+                restore_unbind_button();
+            }
             /*if (dlg.ShowModal() == wxID_OK) {
                 devOpr->set_selected_machine("");
             }*/
@@ -310,6 +357,7 @@ DeviceInfoItemPanel::DeviceInfoItemPanel(wxWindow *parent, const DeviceInfo& inf
 
     m_placement_text = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
     m_placement_text->SetBackgroundColour(m_bg_color);
+    apply_light_mode_text(m_placement_text, wxColour(FF_DEVICE_LIST_SECONDARY_TEXT));
     m_status_text = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
     m_status_text->SetBackgroundColour(m_bg_color);
     m_progress_text = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxHL_ALIGN_RIGHT);
@@ -510,6 +558,7 @@ DeviceStaticItemPanel::DeviceStaticItemPanel(wxWindow* parent, std::string statu
     m_count_text = new wxStaticText(this, wxID_ANY, wxString::Format("%d", m_count), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
     m_count_text->SetFont(::Label::Head_18);
     m_count_text->SetBackgroundColour(wxColour("#ffffff"));
+    apply_light_mode_text(m_count_text, wxColour(FF_DEVICE_LIST_PRIMARY_TEXT));
 
     m_main_sizer->AddStretchSpacer(1);
     m_main_sizer->Add(m_status_text, 0, wxEXPAND | wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(10));
@@ -620,7 +669,12 @@ void DeviceListPanel::build()
     m_default_filter_item = new DeviceFilterItem(m_filter_popup, _L("All"), true);
     m_default_filter_item->Bind(EVT_DEVICE_FILTER_ITEM_CLICKED, &DeviceListPanel::onFilterItemClicked, this);
     m_default_filter_item->Show(false);
+#ifdef __APPLE__
+    const wxColour device_page_bg("#EDEDED");
+    SetBackgroundColour(device_page_bg);
+#else
     SetBackgroundColour(wxColour("#F0F0F0"));
+#endif
     m_placement_btn = new DropDownButton(this, _L("All"), create_scaled_bitmap("device_dropdown", this, 8));
     m_status_btn  = new DropDownButton(this, _L("Status"), create_scaled_bitmap("device_dropdown", this, 8));
     m_type_btn = new DropDownButton(this, _L("Machine Type"), create_scaled_bitmap("device_dropdown", this, 8));
@@ -655,27 +709,88 @@ void DeviceListPanel::build()
     hTopSizer->AddSpacer(FromDIP(30));
     hTopSizer->Add(m_static_btn, 0, wxALIGN_CENTER_VERTICAL);
 
+    wxString homePageUrl = wxGetApp().get_homepage_url();
+    if (homePageUrl.EndsWith("/") || homePageUrl.EndsWith("/home")) {
+        homePageUrl = homePageUrl.Mid(0, homePageUrl.find_last_of('/'));
+    }   
+    m_webBanner                     = WebView::CreateWebView(this, homePageUrl + "/sliceBanner");
+    std::string homePageEnableDebug = wxGetApp().app_config->get("home_page_enable_debug");
+    m_webBanner->EnableAccessToDevTools(homePageEnableDebug == "true" || homePageEnableDebug == "1");
+    WebView::AddOpenNewWindowScript(m_webBanner);
+    m_webBanner->SetMinSize(wxSize(-1, FromDIP(128)));
+    m_webBanner->Hide();
+    m_webBanner->Bind(wxEVT_WEBVIEW_NEWWINDOW, [](wxWebViewEvent& evt) { 
+        wxLaunchDefaultBrowser(evt.GetURL(), wxBROWSER_NEW_WINDOW);
+    });
+    m_webBanner->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, [=](wxWebViewEvent& evt) { 
+        wxString url;
+        if (WebView::TryGetOpenNewWindowUrl(evt, &url)) {
+            CallAfter([url]() { wxLaunchDefaultBrowser(url, wxBROWSER_NEW_WINDOW); });
+            return;
+        }
+
+        std::string response = wxGetApp().handle_web_request(evt.GetString().ToUTF8().data(), {"judge_banner_exist", "banner_get_token"});
+        wxString    resp     = response;
+        if (resp.StartsWith("banner")) {
+            int exist = resp[resp.size() - 1] - '0';
+            if (exist == 1) {
+                m_webBanner->Show();
+            } else {
+                m_webBanner->Hide();
+            }
+        }
+    });
+    wxGetApp().Bind(EVT_BANNER_UPDATE, [=](wxCommandEvent& event) { 
+        bool b = event.GetInt();
+        nlohmann::json json;
+        json["command"]          = "studio_bannerToken";
+        std::string access_token = wxGetApp().app_config->get("access_token");
+        json["data"]["token"]    = b ? access_token : "";
+        json["sequence_id"]      = "10001";
+        std::string jsonStr      = json.dump();
+        wxString    strJS        = wxString::Format("window.postMessage(%s)", wxString::FromUTF8(jsonStr));
+        CallAfter([this, strJS]() { 
+            m_webBanner->RunScript(strJS); 
+        });
+    });
+
     m_simple_book = new wxSimplebook(this);
+#ifdef __APPLE__
+    m_simple_book->SetBackgroundColour(device_page_bg);
+#endif
     // no device panel
     m_no_device_panel = new wxPanel(m_simple_book);
+#ifdef __APPLE__
+    m_no_device_panel->SetBackgroundColour(device_page_bg);
+#endif
     m_no_device_bitmap = new wxStaticBitmap(m_no_device_panel, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxDefaultSize, 0);
     m_no_device_bitmap->SetBitmap(create_scaled_bitmap("monitor_device_empty", nullptr, 250));
     m_no_device_staticText = new wxStaticText(m_no_device_panel, wxID_ANY, wxT("No Device"));
-    m_no_device_staticText->Wrap(-1);
+    wxClientDC no_device_dc(m_no_device_staticText);
+    no_device_dc.SetFont(m_no_device_staticText->GetFont());
+    wxSize no_device_text_size = no_device_dc.GetTextExtent(m_no_device_staticText->GetLabel());
+    m_no_device_staticText->SetMinSize(wxSize(no_device_text_size.x + FromDIP(4), no_device_text_size.y));
     m_no_device_staticText->SetForegroundColour("#909090");
+    apply_light_mode_text(m_no_device_staticText, wxColour(FF_DEVICE_LIST_MUTED_TEXT));
     m_no_device_sizer = new wxBoxSizer(wxVERTICAL);
     m_no_device_sizer->AddStretchSpacer();
     m_no_device_sizer->Add(m_no_device_bitmap, 0, wxALIGN_CENTER_HORIZONTAL);
     m_no_device_sizer->AddSpacer(20);
-    m_no_device_sizer->Add(m_no_device_staticText, 1, wxALL | wxALIGN_CENTER_HORIZONTAL);
+    m_no_device_sizer->Add(m_no_device_staticText, 0, wxALL | wxALIGN_CENTER_HORIZONTAL);
     m_no_device_sizer->AddStretchSpacer();
     m_no_device_panel->SetSizer(m_no_device_sizer);
     m_no_device_panel->Layout();
     m_simple_book->AddPage(m_no_device_panel, wxEmptyString, true);
 
     m_device_scrolled_window = new wxScrolledWindow(m_simple_book, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHSCROLL | wxVSCROLL);
+#ifdef __APPLE__
+    m_device_scrolled_window->SetBackgroundColour(device_page_bg);
+#endif
     m_device_scrolled_window->SetScrollRate(50, 50);
     m_device_panel = new wxPanel(m_device_scrolled_window);
+#ifdef __APPLE__
+    m_device_panel->SetBackgroundColour(device_page_bg);
+#endif
     wxBoxSizer* scroll_sizer = new wxBoxSizer(wxVERTICAL);
     scroll_sizer->AddSpacer(FromDIP(30));
     scroll_sizer->Add(m_device_panel, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(30));
@@ -700,6 +815,7 @@ void DeviceListPanel::build()
     sizer->AddSpacer(FromDIP(10));
     sizer->Add(hor_line, 0, wxALIGN_CENTER_HORIZONTAL | wxEXPAND | wxLEFT | wxRIGHT, FromDIP(30));
     //sizer->AddSpacer(FromDIP(30));
+    sizer->Add(m_webBanner, 0, wxEXPAND);
     sizer->Add(m_simple_book, 1, wxEXPAND | wxALIGN_CENTER_HORIZONTAL);
     //sizer->AddSpacer(FromDIP(30));
     //sizer->Add(m_machinePanel, 1, wxEXPAND);
@@ -712,6 +828,7 @@ void DeviceListPanel::build()
 void DeviceListPanel::OnActivate()
 {
     updateDeviceList();
+    MultiComMgr::inst()->requestWanDeviceListRefresh();
 }
 
 void DeviceListPanel::connectEvent()
@@ -1364,6 +1481,8 @@ void DeviceListPanel::updateDeviceList()
         } else if (DeviceListUpdateEvent::UpdateType::UpdateType_Remove == op) {
             auto iter = m_device_map.find(dev_id);
             if (iter != m_device_map.end()) {
+                iter->second->blockMouseEvent(true);
+                iter->second->Disable();
                 iter->second->Destroy();
                 m_device_map.erase(iter);
                 refresh_flag = true;
@@ -1427,7 +1546,7 @@ bool DeviceListPanel::getDeviceInfo(DeviceInfoItemPanel::DeviceInfo& info, int c
             info.name = data.wanDevInfo.name;        
             info.pid = data.devDetail->pid;
             info.placement = data.wanDevInfo.location;
-            info.status = data.wanDevInfo.status;
+            info.status = wan_device_display_status(data);
             if (data.devDetail) {
                 info.errorCode = data.devDetail->errorCode;
                 info.progress = data.devDetail->printProgress * 100;
@@ -1517,7 +1636,7 @@ void DeviceListPanel::onComDevDetailUpdate(ComDevDetailUpdateEvent& event)
         }
         std::string dev_id = info.lanFlag ? data.lanDevInfo.serialNumber : data.wanDevInfo.serialNumber;
         updateDeviceInfo(dev_id, info);
-        BOOST_LOG_TRIVIAL(info) << "onComDevDetailUpdate: " << info.name << ", " << info.placement << ", " << info.status;
+        BOOST_LOG_TRIVIAL(info) << "Device detail updated, status=" << info.status;
     }
     flush_logs();
     event.Skip();
@@ -1535,14 +1654,14 @@ void DeviceListPanel::onComWanDeviceInfoUpdate(ComWanDevInfoUpdateEvent& event)
         info.conn_id = conn_id;
         info.name = data.wanDevInfo.name;
         info.placement = data.wanDevInfo.location;
-        info.status = data.wanDevInfo.status;
+        info.status = wan_device_display_status(data);
         if (data.devDetail) {
             info.pid = data.devDetail->pid;
             info.errorCode = data.devDetail->errorCode;
             info.progress = data.devDetail->printProgress * 100;
         }
         updateDeviceInfo(data.wanDevInfo.serialNumber, info);
-        BOOST_LOG_TRIVIAL(info) << "onComWanDeviceInfoUpdate: " << info.name << ", " << info.placement << ", " << info.status;
+        BOOST_LOG_TRIVIAL(info) << "WAN device info updated, status=" << info.status;
     }
     flush_logs();
     event.Skip();

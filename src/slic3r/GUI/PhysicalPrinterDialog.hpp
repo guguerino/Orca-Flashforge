@@ -8,10 +8,11 @@
 #include "libslic3r/Preset.hpp"
 #include "GUI_Utils.hpp"
 #include "Widgets/RoundedRectangle.hpp"
+#include "Widgets/Button.hpp"
 
 class wxTextCtrl;
 class wxStaticText;
-class ScalableButton;
+class Button;
 class wxBoxSizer;
 
 namespace Slic3r {
@@ -28,17 +29,17 @@ class PhysicalPrinterDialog : public DPIDialog
     DynamicPrintConfig* m_config            { nullptr };
     ConfigOptionsGroup* m_optgroup          { nullptr };
 
-    ScalableButton*     m_printhost_browse_btn              {nullptr};
-    ScalableButton*     m_printhost_test_btn                {nullptr};
-    ScalableButton*     m_printhost_logout_btn              {nullptr};
-    ScalableButton*     m_printhost_cafile_browse_btn       {nullptr};
-    ScalableButton*     m_printhost_client_cert_browse_btn  {nullptr};
-    ScalableButton*     m_printhost_port_browse_btn         {nullptr};
+    Button*     m_printhost_browse_btn              {nullptr};
+    Button*     m_printhost_test_btn                {nullptr};
+    Button*     m_printhost_logout_btn              {nullptr};
+    Button*     m_printhost_cafile_browse_btn       {nullptr};
+    Button*     m_printhost_client_cert_browse_btn  {nullptr};
+    Button*     m_printhost_port_browse_btn         {nullptr};
 
     RoundedRectangle*   m_input_area                        {nullptr};
     wxStaticText*       m_valid_label                       {nullptr};
     wxTextCtrl*         m_input_ctrl                        {nullptr};
-    wxButton*           btnOK                               {nullptr};
+    Button*             btnOK                               {nullptr};
 
     void build_printhost_settings(ConfigOptionsGroup* optgroup);
     void OnOK(wxEvent& event);
@@ -59,6 +60,7 @@ public:
 
     void        update(bool printer_change = false);
     void        update_host_type(bool printer_change);
+    void        update_printer_agent_type();
     void        update_preset_input();
     void        update_printhost_buttons();
     void        update_printers();
@@ -68,6 +70,7 @@ public:
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
     void on_sys_color_changed() override {};
+    void check_host_key_valid();
 };
 
 

@@ -2,6 +2,9 @@
     "additional_cooling_fan_speed": [
         "40"
     ],
+    "compatible_printers": [
+        "Flashforge Guider4 Pro 0.4 nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "40"
     ],
@@ -26,15 +29,16 @@
     "filament_start_gcode": [
         "; filament start gcode\n;right_extruder_material:PLA\n"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-        "Flashforge Guider4 Pro 0.4 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "hot_plate_temp": [
         "55"
     ],
     "inherits": "Flashforge Generic HS PLA",
+    "setting_id": "Z1NCX8XMyIVlOlWn",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Luminous @FF G4P",
     "nozzle_temperature": [

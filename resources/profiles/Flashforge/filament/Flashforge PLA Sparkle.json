@@ -2,11 +2,14 @@
     "filament_settings_id": [
         "Flashforge PLA Sparkle"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "inherits": "Flashforge Generic PLA",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Sparkle",
+    "setting_id": "LYtdPgec1hBLhoQA",
     "version": "2.1.1.0"
 }

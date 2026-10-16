@@ -20,6 +20,7 @@ public:
     decltype(&fnet_initlize) initlize;
     decltype(&fnet_uninitlize) uninitlize;
     decltype(&fnet_getVersion) getVersion;
+    decltype(&fnet_getHomePageUrl) getHomePageUrl;
     decltype(&fnet_setUserAgent) setUserAgent;
     decltype(&fnet_getLanDevList) getLanDevList;
     decltype(&fnet_freeLanDevInfos) freeLanDevInfos;
@@ -80,6 +81,8 @@ public:
     decltype(&fnet_bindAccountRelp) bindAccountRelp;
     decltype(&fnet_freeBindAccountRelpResult) freeBindAccountRelpResult;
     decltype(&fnet_uploadAiImageClound) uploadAiImageClound;
+    decltype(&fnet_uploadLogFileCloud) uploadLogFileCloud;
+    decltype(&fnet_uploadLogFileCloudEx) uploadLogFileCloudEx;
     decltype(&fnet_freeCloundFileData) freeCloundFileData;
     decltype(&fnet_getUserAiPointsInfo) getUserAiPointsInfo;
     decltype(&fnet_freeUserAiPointsInfo) freeUserAiPointsInfo;
@@ -105,11 +108,26 @@ public:
     decltype(&fnet_userClickCount) userClickCount;
     decltype(&fnet_addPrintListModel) addPrintListModel;
     decltype(&fnet_removePrintListModel) removePrintListModel;
+    decltype(&fnet_navLikeModel) navLikeModel;
     decltype(&fnet_reportModel) reportModel;
     decltype(&fnet_reportTrackingData) reportTrackingData;
     decltype(&fnet_reportTrackingDataBatch) reportTrackingDataBatch;
+    decltype(&fnet_getSystemMessage)getSystemMessage;
+    decltype(&fnet_postReadSystemMessage)postReadSystemMessage;
+    decltype(&fnet_freeSystemMessage)freeSystemMessage;
+    decltype(&fnet_getMonitorMessage)getMonitorMessage;
+    decltype(&fnet_retrySliceTask)retrySliceTask;
+    decltype(&fnet_cancelSliceTask)cancelSliceTask;
+    decltype(&fnet_freeSliceState)freeSliceState;
+    decltype(&fnet_freeJobInfo)freeJobInfo;
     decltype(&fnet_doBusGetRequest) doBusGetRequest;
     decltype(&fnet_doBusPostRequest) doBusPostRequest;
+    decltype(&fnet_getSettingList2) getSettingList2;
+    decltype(&fnet_getSettingList) getSettingList;
+    decltype(&fnet_getUserPresets) getUserPresets;
+    decltype(&fnet_requestSettingId) requestSettingId;
+    decltype(&fnet_putSetting) putSetting;
+    decltype(&fnet_deleteSetting) deleteSetting;
     decltype(&fnet_getMqttConfig) getMqttConfig;
     decltype(&fnet_freeMqttConfig) freeMqttConfig;
     decltype(&fnet_createConnection) createConnection;
@@ -123,6 +141,7 @@ public:
     decltype(&fnet_freeSyncLoginInfo) freeSyncLoginInfo;
     decltype(&fnet_freeSyncBindInfo) freeSyncBindInfo;
     decltype(&fnet_freeSyncOnlineInfo) freeSyncOnlineInfo;
+    decltype(&fnet_freeUploadLogInfo) freeUploadLogInfo;
     decltype(&fnet_allocString) allocString;
     decltype(&fnet_freeString) freeString;
 

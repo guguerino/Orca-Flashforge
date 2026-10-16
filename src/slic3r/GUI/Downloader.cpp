@@ -3,10 +3,22 @@
 #include "NotificationManager.hpp"
 #include "format.hpp"
 #include "MainFrame.hpp"
+#include "wxExtensions.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/regex.hpp>
+#include <algorithm>
+
+#ifdef __linux__
+#include <wx/bmpbuttn.h>
+#include <wx/button.h>
+#include <wx/filename.h>
+#include <wx/gauge.h>
+#include <wx/popupwin.h>
+#include <wx/statline.h>
+#include <wx/timer.h>
+#endif
 
 namespace Slic3r {
 namespace GUI {
@@ -17,15 +29,13 @@ void open_folder(const std::string& path)
 	// Code taken from NotificationManager.cpp
 
 	// Execute command to open a file explorer, platform dependent.
-	// FIXME: The const_casts aren't needed in wxWidgets 3.1, remove them when we upgrade.
-
 #ifdef _WIN32
 	const wxString widepath = from_u8(path);
 	const wchar_t* argv[] = { L"explorer", widepath.GetData(), nullptr };
-	::wxExecute(const_cast<wchar_t**>(argv), wxEXEC_ASYNC, nullptr);
+	::wxExecute(argv, wxEXEC_ASYNC, nullptr);
 #elif __APPLE__
 	const char* argv[] = { "open", path.data(), nullptr };
-	::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr);
+	::wxExecute(argv, wxEXEC_ASYNC, nullptr);
 #else
 	const char* argv[] = { "xdg-open", path.data(), nullptr };
 
@@ -53,11 +63,11 @@ void open_folder(const std::string& path)
 			exec_env.cwd = std::move(owd);
 		}
 
-		::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr, &exec_env);
+		::wxExecute(argv, wxEXEC_ASYNC, nullptr, &exec_env);
 	}
 	else {
 		// Looks like we're NOT running from AppImage, we'll make no changes to the environment.
-		::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr, nullptr);
+		::wxExecute(argv, wxEXEC_ASYNC, nullptr, nullptr);
 	}
 #endif
 }
@@ -68,9 +78,300 @@ std::string filename_from_url(const std::string& url)
 	size_t slash = url.find_last_of("/");
 	if (slash == std::string::npos && slash != url.size() - 1)
 		return {};
+    size_t question_mark = url.find_last_of("?");
+    if (question_mark != std::string::npos && question_mark > slash)
+        return url.substr(slash + 1, question_mark - slash - 1);
 	return url.substr(slash + 1, url.size() - slash + 1);
 }
+
+#ifdef __linux__
+class LinuxWebDownloadPopup : public wxPopupWindow
+{
+public:
+    explicit LinuxWebDownloadPopup(wxWindow *parent)
+        : wxPopupWindow(parent, wxBORDER_NONE)
+        , m_hide_timer(this)
+    {
+        SetBackgroundColour(*wxWHITE);
+
+        auto *outer_sizer = new wxBoxSizer(wxVERTICAL);
+        auto *header_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+        auto *title = new wxStaticText(this, wxID_ANY, _L("Downloads"));
+        wxFont title_font = title->GetFont();
+        title_font.SetWeight(wxFONTWEIGHT_BOLD);
+        title->SetFont(title_font);
+
+        auto *close_btn = new wxBitmapButton(this, wxID_ANY, create_scaled_bitmap("title_close", this, 12), wxDefaultPosition,
+                                             wxDefaultSize, wxBORDER_NONE);
+        close_btn->SetBitmapHover(create_scaled_bitmap("title_closeHover", this, 12));
+        close_btn->SetBitmapPressed(create_scaled_bitmap("title_closePress", this, 12));
+        close_btn->SetBackgroundColour(*wxWHITE);
+        close_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { Hide(); });
+
+        header_sizer->Add(title, 1, wxALIGN_CENTER_VERTICAL);
+        header_sizer->Add(close_btn, 0, wxLEFT, FromDIP(8));
+
+        m_items_sizer = new wxBoxSizer(wxVERTICAL);
+        outer_sizer->Add(header_sizer, 0, wxEXPAND | wxALL, FromDIP(12));
+        outer_sizer->Add(new wxStaticLine(this), 0, wxEXPAND);
+        outer_sizer->Add(m_items_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        SetSizer(outer_sizer);
+
+        Bind(wxEVT_TIMER, &LinuxWebDownloadPopup::OnHideTimer, this);
+    }
+
+    void Start(size_t id, const wxString &filename, const wxString &folder)
+    {
+        m_hide_timer.Stop();
+
+        auto iter = m_items.find(id);
+        if (iter == m_items.end()) {
+            iter = m_items.emplace(id, CreateItem(id)).first;
+            TrimItems();
+        }
+
+        DownloadItem &item = iter->second;
+        item.filename = filename;
+        item.folder = folder;
+        item.title->SetLabel(Ellipsize(filename));
+        item.status->SetLabel(_L("Downloading..."));
+        item.gauge->SetValue(0);
+        item.gauge->Show();
+        item.open_folder_btn->Enable(false);
+        item.panel->Show();
+        item.active = true;
+
+        LayoutAndShow();
+    }
+
+    void SetProgress(size_t id, float percentage)
+    {
+        auto iter = m_items.find(id);
+        if (iter == m_items.end()) {
+            return;
+        }
+        int value = std::max(0, std::min(100, static_cast<int>(percentage * 100.f)));
+        iter->second.gauge->SetValue(value);
+        iter->second.status->SetLabel(wxString::Format(_L("Downloading... %d%%"), value));
+        iter->second.active = true;
+        m_hide_timer.Stop();
+        LayoutAndShow();
+    }
+
+    void Complete(size_t id, const wxString &path)
+    {
+        auto iter = m_items.find(id);
+        if (iter == m_items.end()) {
+            wxFileName file_name(path);
+            iter = m_items.emplace(id, CreateItem(id)).first;
+            TrimItems();
+            iter->second.filename = file_name.GetFullName();
+        }
+
+        DownloadItem &item = iter->second;
+        wxFileName file_name(path);
+        item.folder = file_name.GetPath();
+        item.title->SetLabel(Ellipsize(item.filename.IsEmpty() ? file_name.GetFullName() : item.filename));
+        item.status->SetLabel(_L("Download complete"));
+        item.gauge->SetValue(100);
+        item.gauge->Hide();
+        item.open_folder_btn->Enable(true);
+        item.active = false;
+
+        LayoutAndShow();
+        ArmAutoHideIfIdle();
+    }
+
+    void Error(size_t id, const wxString &message)
+    {
+        auto iter = m_items.find(id);
+        if (iter == m_items.end()) {
+            return;
+        }
+        iter->second.status->SetLabel(message.IsEmpty() ? _L("Download failed") : message);
+        iter->second.gauge->Hide();
+        iter->second.open_folder_btn->Enable(false);
+        iter->second.active = false;
+        LayoutAndShow();
+        ArmAutoHideIfIdle();
+    }
+
+    void Canceled(size_t id)
+    {
+        auto iter = m_items.find(id);
+        if (iter == m_items.end()) {
+            return;
+        }
+        iter->second.status->SetLabel(_L("Download canceled"));
+        iter->second.gauge->Hide();
+        iter->second.open_folder_btn->Enable(false);
+        iter->second.active = false;
+        LayoutAndShow();
+        ArmAutoHideIfIdle();
+    }
+
+private:
+    struct DownloadItem
+    {
+        wxPanel      *panel{nullptr};
+        wxStaticText *title{nullptr};
+        wxStaticText *status{nullptr};
+        wxGauge      *gauge{nullptr};
+        wxButton     *open_folder_btn{nullptr};
+        wxString      filename;
+        wxString      folder;
+        bool          active{false};
+    };
+
+    DownloadItem CreateItem(size_t id)
+    {
+        DownloadItem item;
+        item.panel = new wxPanel(this);
+        item.panel->SetBackgroundColour(*wxWHITE);
+
+        auto *sizer = new wxBoxSizer(wxVERTICAL);
+        item.title = new wxStaticText(item.panel, wxID_ANY, wxEmptyString);
+        item.status = new wxStaticText(item.panel, wxID_ANY, wxEmptyString);
+        item.gauge = new wxGauge(item.panel, wxID_ANY, 100, wxDefaultPosition, wxSize(FromDIP(320), FromDIP(6)));
+        item.open_folder_btn = new wxButton(item.panel, wxID_ANY, _L("Open folder"));
+        item.open_folder_btn->Enable(false);
+        item.open_folder_btn->Bind(wxEVT_BUTTON, [this, id](wxCommandEvent &) {
+            auto iter = m_items.find(id);
+            if (iter != m_items.end() && !iter->second.folder.IsEmpty()) {
+                open_folder(iter->second.folder.utf8_string());
+            }
+        });
+
+        sizer->Add(item.title, 0, wxEXPAND | wxTOP, FromDIP(10));
+        sizer->Add(item.status, 0, wxEXPAND | wxTOP, FromDIP(4));
+        sizer->Add(item.gauge, 0, wxEXPAND | wxTOP, FromDIP(8));
+        sizer->Add(item.open_folder_btn, 0, wxALIGN_RIGHT | wxTOP, FromDIP(8));
+        item.panel->SetSizer(sizer);
+
+        if (!m_items.empty()) {
+            m_items_sizer->Add(new wxStaticLine(this), 0, wxEXPAND | wxTOP, FromDIP(10));
+        }
+        m_items_sizer->Add(item.panel, 0, wxEXPAND);
+        return item;
+    }
+
+    wxString Ellipsize(const wxString &text) const
+    {
+        constexpr size_t max_chars = 42;
+        if (text.length() <= max_chars) {
+            return text;
+        }
+        return text.Left(max_chars - 3) + "...";
+    }
+
+    void LayoutAndShow()
+    {
+        wxWindow *parent = GetParent();
+        if (parent == nullptr) {
+            return;
+        }
+
+        SetSize(wxSize(parent->FromDIP(360), wxDefaultCoord));
+        Layout();
+        Fit();
+
+        wxSize size = GetSize();
+        wxPoint pos = parent->ClientToScreen(wxPoint(
+            parent->GetClientSize().x - size.x - parent->FromDIP(18),
+            parent->FromDIP(58)));
+        Move(pos);
+
+        if (!IsShown()) {
+            Show();
+        }
+        Raise();
+    }
+
+    void ArmAutoHideIfIdle()
+    {
+        for (const auto &item : m_items) {
+            if (item.second.active) {
+                return;
+            }
+        }
+        m_hide_timer.StartOnce(6000);
+    }
+
+    void OnHideTimer(wxTimerEvent &)
+    {
+        Hide();
+    }
+
+    void TrimItems()
+    {
+        constexpr size_t max_items = 5;
+        while (m_items.size() > max_items) {
+            auto iter = m_items.begin();
+            if (iter->second.panel != nullptr) {
+                iter->second.panel->Hide();
+            }
+            m_items.erase(iter);
+        }
+    }
+
+    wxBoxSizer *m_items_sizer{nullptr};
+    std::map<size_t, DownloadItem> m_items;
+    wxTimer m_hide_timer;
+};
+
+LinuxWebDownloadPopup *linux_web_download_popup()
+{
+    static LinuxWebDownloadPopup *popup = nullptr;
+    wxWindow *parent = wxGetApp().mainframe;
+    if (parent == nullptr) {
+        return nullptr;
+    }
+    if (popup == nullptr || popup->GetParent() != parent) {
+        popup = new LinuxWebDownloadPopup(parent);
+    }
+    return popup;
 }
+#endif
+}
+
+#ifdef __linux__
+void show_linux_web_download_start(size_t id, const wxString &filename, const wxString &folder)
+{
+    if (auto *popup = linux_web_download_popup()) {
+        popup->Start(id, filename, folder);
+    }
+}
+
+void show_linux_web_download_progress(size_t id, float percentage)
+{
+    if (auto *popup = linux_web_download_popup()) {
+        popup->SetProgress(id, percentage);
+    }
+}
+
+void show_linux_web_download_complete(const wxString &path)
+{
+    static size_t synthetic_download_id = 1000000000;
+    if (auto *popup = linux_web_download_popup()) {
+        popup->Complete(++synthetic_download_id, path);
+    }
+}
+
+void show_linux_web_download_complete(size_t id, const wxString &path)
+{
+    if (auto *popup = linux_web_download_popup()) {
+        popup->Complete(id, path);
+    }
+}
+
+void show_linux_web_download_error(size_t id, const wxString &message)
+{
+    if (auto *popup = linux_web_download_popup()) {
+        popup->Error(id, message);
+    }
+}
+#endif
 
 Download::Download(int ID, std::string url, wxEvtHandler* evt_handler, const boost::filesystem::path& dest_folder)
     : m_id(ID)
@@ -138,7 +439,7 @@ Downloader::Downloader()
 	Bind(EVT_DWNLDR_FILE_CANCELED, &Downloader::on_canceled, this);
 }
 
-void Downloader::start_download(const std::string& full_url, const std::string &fileName /* = "" */)
+void Downloader::start_download(const std::string& full_url, const std::string& fileName /* = "" */, bool need_escape /* = false */)
 {
 	assert(m_initialized);
 
@@ -156,7 +457,7 @@ void Downloader::start_download(const std::string& full_url, const std::string &
     // Orca: Replace PS workaround for "mysterious slash" with a more dynamic approach
     // Windows seems to have fixed the issue and this provides backwards compatability for those it still affects
 	boost::regex re(R"(^(orcaflashforge|orcaslicer|prusaslicer|bambustudio|cura):\/\/open[\/]?\?file=)", boost::regbase::icase);
-	boost::regex re2(R"(^(bambustudioopen):\/\/)", boost::regex::icase);
+	boost::regex re2(R"(^(orcaflashforgeopen|bambustudioopen):\/\/)", boost::regex::icase);
     boost::smatch results;
 
 	if (!boost::regex_search(full_url, results, re) && !boost::regex_search(full_url, results, re2)) {
@@ -169,10 +470,15 @@ void Downloader::start_download(const std::string& full_url, const std::string &
 	}
     size_t id = get_next_id();
 	std::string result_url = full_url.substr(results.length());
-    if (is_bambustudio_open(full_url) || (is_orca_open(full_url) && is_makerworld_link(full_url))) {
-		plater->request_model_download(wxString::FromUTF8(result_url));
+    std::string real_url    = result_url; //final url
+    if (need_escape) {
+        std::string escaped_url = FileGet::escape_url(full_url.substr(results.length()));
+        real_url                = escaped_url;
+    }
+	if (is_bambustudio_open(full_url) || (is_orca_open(full_url) && is_makerworld_link(full_url))) {
+        plater->request_model_download(wxString::FromUTF8(real_url));
 	} else {
-        m_downloads.emplace_back(std::make_unique<Download>(id, result_url, fileName, this, m_dest_folder));
+        m_downloads.emplace_back(std::make_unique<Download>(id, real_url, fileName, this, m_dest_folder));
 		push_dest_folder_cache(id, m_dest_folder.string());
         NotificationManager* ntf_mngr = wxGetApp().notification_manager();
         ntf_mngr->push_download_URL_progress_notification(id, m_downloads.back()->get_filename(),
@@ -186,7 +492,7 @@ void Downloader::start_download(const std::string& full_url, const std::string &
 void Downloader::on_progress(wxCommandEvent& event)
 {
 	size_t id = event.GetInt();
-	float percent = (float)std::stoi(boost::nowide::narrow(event.GetString())) / 100.f;
+	float percent = (float)std::stoi(into_u8(event.GetString())) / 100.f;
 	//BOOST_LOG_TRIVIAL(error) << "progress " << id << ": " << percent;
 	NotificationManager* ntf_mngr = wxGetApp().notification_manager();
 	BOOST_LOG_TRIVIAL(trace) << "Download "<< id << ": " << percent;
@@ -198,7 +504,7 @@ void Downloader::on_error(wxCommandEvent& event)
     set_download_state(event.GetInt(), DownloadState::DownloadError);
     BOOST_LOG_TRIVIAL(error) << "Download error: " << event.GetString();
 	NotificationManager* ntf_mngr = wxGetApp().notification_manager();
-	ntf_mngr->set_download_URL_error(id, boost::nowide::narrow(event.GetString()));
+    ntf_mngr->set_download_URL_error(id, into_u8(event.GetString()));
 	show_error(nullptr, format_wxstr(L"%1%\n%2%", _L("The download has failed") + ":", event.GetString()));
 	remove_download(id);
 }
@@ -206,7 +512,7 @@ void Downloader::on_complete(wxCommandEvent& event)
 {
 	// TODO: is this always true? :
 	// here we open the file itself, notification should get 1.f progress from on progress.
-    set_download_state(event.GetInt(), DownloadState::DownloadDone);
+	set_download_state(event.GetInt(), DownloadState::DownloadDone);
 	wxArrayString paths;
 	paths.Add(event.GetString());
 	wxGetApp().plater()->load_files(paths);

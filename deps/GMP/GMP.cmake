@@ -1,18 +1,22 @@
 
 set(_srcdir ${CMAKE_CURRENT_LIST_DIR}/gmp)
 
+if (IN_GIT_REPO)
+    set(GMP_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_GMP-prefix/src/dep_GMP)
+endif ()
+
 if (MSVC)
-    set(_output  ${DESTDIR}/include/gmp.h 
-                 ${DESTDIR}/lib/libgmp-10.lib 
+    set(_output  ${DESTDIR}/include/gmp.h
+                 ${DESTDIR}/lib/libgmp-10.lib
                  ${DESTDIR}/bin/libgmp-10.dll)
 
     add_custom_command(
         OUTPUT  ${_output}
         COMMAND ${CMAKE_COMMAND} -E copy ${_srcdir}/include/gmp.h ${DESTDIR}/include/
-        COMMAND ${CMAKE_COMMAND} -E copy ${_srcdir}/lib/win${DEPS_BITS}/libgmp-10.lib ${DESTDIR}/lib/
-        COMMAND ${CMAKE_COMMAND} -E copy ${_srcdir}/lib/win${DEPS_BITS}/libgmp-10.dll ${DESTDIR}/bin/
+        COMMAND ${CMAKE_COMMAND} -E copy ${_srcdir}/lib/win-${DEPS_ARCH}/libgmp-10.lib ${DESTDIR}/lib/
+        COMMAND ${CMAKE_COMMAND} -E copy ${_srcdir}/lib/win-${DEPS_ARCH}/libgmp-10.dll ${DESTDIR}/bin/
     )
-    
+
     add_custom_target(dep_GMP SOURCES ${_output})
 
 else ()

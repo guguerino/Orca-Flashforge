@@ -1,4 +1,7 @@
 {
+    "compatible_printers": [
+        "Flashforge Guider4 0.4 nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "50"
     ],
@@ -20,11 +23,10 @@
     "filament_settings_id": [
         "Flashforge ABS Basic @FF G4"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge Guider4 0.4 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "hot_plate_temp": [
         "100"
     ],
@@ -32,6 +34,8 @@
         "100"
     ],
     "inherits": "Flashforge Generic ABS",
+    "setting_id": "8o2maTFOXq0XR6Dm",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge ABS Basic @FF G4",
     "slow_down_layer_time": [

@@ -117,7 +117,7 @@ void resolve_path_from_var(const std::string& var, std::vector<std::string>& pat
     wxString wxdirs;
     if (! wxGetEnv(boost::nowide::widen(var), &wxdirs) || wxdirs.empty() )
         return;
-    std::string dirs = boost::nowide::narrow(wxdirs);
+    std::string dirs = into_u8(wxdirs);
     for (size_t i = dirs.find(':'); i != std::string::npos; i = dirs.find(':'))
     {
         paths.push_back(dirs.substr(0, i));
@@ -302,7 +302,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             // if all failed - try creating default home folder
             if (i == target_candidates.size() - 1) {
                 // create $HOME/.local/share
-                create_path(boost::nowide::narrow(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
+                create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
                 // copy icon
                 target_dir_icons = GUI::format("%1%/.local/share",wxFileName::GetHomeDir());
                 std::string icon_path = GUI::format("%1%/images/Orca-Flashforge.png",resources_dir());
@@ -336,6 +336,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 "Exec=\"%3%\" %%F\n"
                 "Terminal=false\n"
                 "Type=Application\n"
+                "PrefersNonDefaultGPU=true\n"
+                "X-KDE-RunOnDiscreteGpu=true\n"
                 "MimeType=model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;\n"
                 "Categories=Graphics;3DGraphics;Engineering;\n"
                 "Keywords=3D;Printing;Slicer;slice;3D;printer;convert;gcode;stl;obj;amf;SLA\n"
@@ -354,7 +356,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             // if all failed - try creating default home folder
             if (i == target_candidates.size() - 1) {
                 // create $HOME/.local/share
-                create_path(boost::nowide::narrow(wxFileName::GetHomeDir()), ".local/share/applications");
+                create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/applications");
                 // create desktop file
                 target_dir_desktop = GUI::format("%1%/.local/share",wxFileName::GetHomeDir());
                 std::string path = GUI::format("%1%/applications/Orca-Flashforge%2%.desktop", target_dir_desktop, version_suffix);
@@ -405,6 +407,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             "Exec=\"%3%\" --gcodeviewer %%F\n"
             "Terminal=false\n"
             "Type=Application\n"
+            "PrefersNonDefaultGPU=true\n"
+            "X-KDE-RunOnDiscreteGpu=true\n"
             "MimeType=text/x.gcode;\n"
             "Categories=Graphics;3DGraphics;\n"
             "Keywords=3D;Printing;Slicer;\n"
@@ -562,7 +566,7 @@ void DesktopIntegrationDialog::perform_downloader_desktop_integration(std::strin
     // if all failed - try creating default home folder
     if (!candidate_found) {
         // create $HOME/.local/share
-        create_path(boost::nowide::narrow(wxFileName::GetHomeDir()), ".local/share/applications");
+        create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/applications");
         // create desktop file
         target_dir_desktop = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
         std::string path = GUI::format("%1%/applications/OrcaSlicerURLProtocol-%2%%3%.desktop", target_dir_desktop, url_prefix, version_suffix);

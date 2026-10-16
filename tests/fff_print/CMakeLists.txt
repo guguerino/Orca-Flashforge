@@ -1,5 +1,5 @@
 get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
-add_executable(${_TEST_NAME}_tests 
+add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_data.cpp
 	test_data.hpp
@@ -7,7 +7,9 @@ add_executable(${_TEST_NAME}_tests
 	test_fill.cpp
 	test_flow.cpp
 	test_gcode.cpp
+	test_gcode_timing.cpp
 	test_gcodewriter.cpp
+	test_mixed_filament_e2e.cpp
 	test_model.cpp
 	test_print.cpp
 	test_printgcode.cpp
@@ -16,12 +18,9 @@ add_executable(${_TEST_NAME}_tests
 	test_support_material.cpp
 	test_trianglemesh.cpp
 	)
-target_link_libraries(${_TEST_NAME}_tests test_common libslic3r)
+target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2WithMain)
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
-if (WIN32)
-    bambuslicer_copy_dlls(${_TEST_NAME}_tests)
-endif()
+orcaslicer_copy_test_dlls()
 
-# catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: ")
-add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
+orcaslicer_discover_tests(${_TEST_NAME}_tests)

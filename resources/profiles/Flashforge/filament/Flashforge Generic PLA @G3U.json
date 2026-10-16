@@ -1,9 +1,4 @@
 {
-    "type": "filament",
-    "filament_id": "GFB99",
-    "setting_id": "GFSA04",
-    "instantiation": "false",
-    "from": "system",
     "activate_air_filtration": [
         "0"
     ],
@@ -19,13 +14,14 @@
     "close_fan_the_first_x_layers": [
         "1"
     ],
-  "compatible_printers": [
-    "Flashforge Guider 3 Ultra 0.4 Nozzle",
-    "Flashforge Guider 3 Ultra 0.6 Nozzle",
-    "Flashforge Guider 3 Ultra 0.8 Nozzle"
-  ],
+    "compatible_printers": [
+        "Flashforge Guider 3 Ultra 0.4 Nozzle",
+        "Flashforge Guider 3 Ultra 0.6 Nozzle",
+        "Flashforge Guider 3 Ultra 0.8 Nozzle"
+    ],
     "compatible_printers_condition": "",
-    "compatible_prints": [],
+    "compatible_prints": [
+    ],
     "compatible_prints_condition": "",
     "complete_print_exhaust_fan_speed": [
         "80"
@@ -90,6 +86,7 @@
     "filament_flow_ratio": [
         "1"
     ],
+    "filament_id": "GFB99",
     "filament_is_support": [
         "0"
     ],
@@ -178,7 +175,7 @@
         "40"
     ],
     "filament_vendor": [
-        "Generic"
+        "Flashforge"
     ],
     "filament_wipe": [
         "nil"
@@ -192,6 +189,7 @@
     "filament_z_hop_types": [
         "nil"
     ],
+    "from": "system",
     "full_fan_speed_layer": [
         "0"
     ],
@@ -202,6 +200,7 @@
         "55"
     ],
     "inherits": "Flashforge Generic PLA",
+    "instantiation": "false",
     "name": "Flashforge Generic PLA @G3U",
     "nozzle_temperature": [
         "220"
@@ -251,5 +250,6 @@
     "textured_plate_temp_initial_layer": [
         "55"
     ],
+    "type": "filament",
     "version": "1.8.0.0"
 }

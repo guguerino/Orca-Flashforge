@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <map>
+#include <utility>
 #include <wx/event.h>
 #include "MultiComDef.hpp"
 
@@ -74,6 +75,24 @@ struct ComDevDetailUpdateEvent : public ComConnectionEvent
         return new ComDevDetailUpdateEvent(GetEventType(), id, commandId, devDetail);
     }
     fnet_dev_detail_t *devDetail;
+};
+
+struct ComCloudSliceUpdateEvent : public ComConnectionEvent
+{
+    ComCloudSliceUpdateEvent(wxEventType type, com_id_t _id, int _commandId, fnet_slice_state_t* _state)
+        : ComConnectionEvent(type, _id, _commandId), state(_state)
+    {}
+    ComCloudSliceUpdateEvent* Clone() const { return new ComCloudSliceUpdateEvent(GetEventType(), id, commandId, state); }
+    fnet_slice_state_t*       state;
+};
+
+struct ComJobInfoUpdateEvent : public ComConnectionEvent
+{
+    ComJobInfoUpdateEvent(wxEventType type, com_id_t _id, int _commandId, fnet_job_info_t* _info)
+        : ComConnectionEvent(type, _id, _commandId), info(_info)
+    {}
+    ComJobInfoUpdateEvent* Clone() const { return new ComJobInfoUpdateEvent(GetEventType(), id, commandId, info); }
+    fnet_job_info_t*       info;
 };
 
 struct ComGetDevGcodeListEvent : public ComConnectionEvent 
@@ -204,52 +223,139 @@ struct ComSendGcodeFinishEvent : public ComConnectionEvent
 
 struct ComWanDevMaintainEvent : public wxCommandEvent
 {
-    ComWanDevMaintainEvent(wxEventType type, bool _login, bool _online, ComErrno _ret)
+    ComWanDevMaintainEvent(wxEventType type, bool _login, bool _online, ComErrno _ret,
+        WanServiceState _serviceState = WanServiceState::Unknown,
+        WanLogoutReason _logoutReason = WanLogoutReason::Unknown,
+        uint64_t _sessionGeneration = 0)
         : wxCommandEvent(type)
         , login(_login)
         , online(_online)
         , ret(_ret)
+        , serviceState(_serviceState)
+        , logoutReason(_logoutReason)
+        , sessionGeneration(_sessionGeneration)
     {
     }
     ComWanDevMaintainEvent *Clone() const
     {
-        return new ComWanDevMaintainEvent(GetEventType(), login, online, ret);
+        return new ComWanDevMaintainEvent(
+            GetEventType(), login, online, ret, serviceState, logoutReason, sessionGeneration);
     }
     bool login;
     bool online;
     ComErrno ret;
+    WanServiceState serviceState;
+    WanLogoutReason logoutReason;
+    uint64_t sessionGeneration;
 };
 
 struct ComGetUserProfileEvent : public wxCommandEvent
 {
-    ComGetUserProfileEvent(wxEventType type, const com_user_profile_t &_userProfile, ComErrno _ret)
+    ComGetUserProfileEvent(wxEventType type, const com_user_profile_t &_userProfile, ComErrno _ret,
+        uint64_t _sessionGeneration)
         : wxCommandEvent(type)
         , userProfile(_userProfile)
         , ret(_ret)
+        , sessionGeneration(_sessionGeneration)
     {
     }
     ComGetUserProfileEvent *Clone() const
     {
-        return new ComGetUserProfileEvent(GetEventType(), userProfile, ret);
+        return new ComGetUserProfileEvent(GetEventType(), userProfile, ret, sessionGeneration);
     }
     com_user_profile_t userProfile;
     ComErrno ret;
+    uint64_t sessionGeneration;
 };
 
 struct ComRefreshTokenEvent : public wxCommandEvent
 {
-    ComRefreshTokenEvent(wxEventType type, const com_token_data_t &_tokenData, ComErrno _ret)
+    ComRefreshTokenEvent(wxEventType type, const com_token_data_t &_tokenData, ComErrno _ret,
+        uint64_t _sessionGeneration, uint64_t _previousRevision, uint64_t _tokenRevision)
         : wxCommandEvent(type)
         , tokenData(_tokenData)
         , ret(_ret)
+        , sessionGeneration(_sessionGeneration)
+        , previousRevision(_previousRevision)
+        , tokenRevision(_tokenRevision)
     {
     }
     ComRefreshTokenEvent *Clone() const
     {
-        return new ComRefreshTokenEvent(GetEventType(), tokenData, ret);
+        return new ComRefreshTokenEvent(
+            GetEventType(), tokenData, ret, sessionGeneration, previousRevision, tokenRevision);
     }
     com_token_data_t tokenData;
     ComErrno ret;
+    uint64_t sessionGeneration;
+    uint64_t previousRevision;
+    uint64_t tokenRevision;
+};
+
+struct ComAccessTokenRefreshResultEvent : public wxCommandEvent
+{
+    ComAccessTokenRefreshResultEvent(wxEventType type, ComErrno _ret, std::string _accessToken,
+        uint64_t _sessionGeneration, uint64_t _requestGeneration, uint64_t _tokenRevision)
+        : wxCommandEvent(type)
+        , ret(_ret)
+        , accessToken(std::move(_accessToken))
+        , sessionGeneration(_sessionGeneration)
+        , requestGeneration(_requestGeneration)
+        , tokenRevision(_tokenRevision)
+    {
+    }
+    ComAccessTokenRefreshResultEvent *Clone() const
+    {
+        return new ComAccessTokenRefreshResultEvent(
+            GetEventType(), ret, accessToken, sessionGeneration, requestGeneration, tokenRevision);
+    }
+    ComErrno ret;
+    std::string accessToken;
+    uint64_t sessionGeneration;
+    uint64_t requestGeneration;
+    uint64_t tokenRevision;
+};
+
+struct ComMqttConfigRefreshEvent : public wxCommandEvent
+{
+    ComMqttConfigRefreshEvent(wxEventType type, const com_mqtt_config_t &_config, ComErrno _ret,
+        uint64_t _sessionGeneration, uint64_t _requestGeneration, uint64_t _tokenRevision,
+        bool _tokenRefreshAttempted, bool _tokenRefreshSucceeded)
+        : wxCommandEvent(type)
+        , config(_config)
+        , ret(_ret)
+        , sessionGeneration(_sessionGeneration)
+        , requestGeneration(_requestGeneration)
+        , tokenRevision(_tokenRevision)
+        , tokenRefreshAttempted(_tokenRefreshAttempted)
+        , tokenRefreshSucceeded(_tokenRefreshSucceeded)
+    {
+    }
+    ComMqttConfigRefreshEvent *Clone() const
+    {
+        return new ComMqttConfigRefreshEvent(GetEventType(), config, ret, sessionGeneration,
+            requestGeneration, tokenRevision, tokenRefreshAttempted, tokenRefreshSucceeded);
+    }
+    com_mqtt_config_t config;
+    ComErrno ret;
+    uint64_t sessionGeneration;
+    uint64_t requestGeneration;
+    uint64_t tokenRevision;
+    bool tokenRefreshAttempted;
+    bool tokenRefreshSucceeded;
+};
+
+struct ComMqttConnectionStoppedEvent : public wxCommandEvent
+{
+    ComMqttConnectionStoppedEvent(wxEventType type, uint64_t _stopGeneration)
+        : wxCommandEvent(type), stopGeneration(_stopGeneration)
+    {
+    }
+    ComMqttConnectionStoppedEvent *Clone() const
+    {
+        return new ComMqttConnectionStoppedEvent(GetEventType(), stopGeneration);
+    }
+    uint64_t stopGeneration;
 };
 
 struct ComBusRequestEvent : public wxCommandEvent
@@ -328,12 +434,19 @@ wxDECLARE_EVENT(COM_SEND_GCODE_FINISH_EVENT, ComSendGcodeFinishEvent);
 wxDECLARE_EVENT(COM_WAN_DEV_MAINTAIN_EVENT, ComWanDevMaintainEvent);
 wxDECLARE_EVENT(COM_GET_USER_PROFILE_EVENT, ComGetUserProfileEvent);
 wxDECLARE_EVENT(COM_REFRESH_TOKEN_EVENT, ComRefreshTokenEvent);
+wxDECLARE_EVENT(COM_ACCESS_TOKEN_REFRESH_RESULT_EVENT, ComAccessTokenRefreshResultEvent);
+wxDECLARE_EVENT(COM_MQTT_CONFIG_REFRESH_EVENT, ComMqttConfigRefreshEvent);
+wxDECLARE_EVENT(COM_MQTT_CONNECTION_STOPPED_EVENT, ComMqttConnectionStoppedEvent);
 wxDECLARE_EVENT(COM_ADD_PRINT_LIST_MODEL_EVENT, ComBusRequestEvent);
 wxDECLARE_EVENT(COM_REMOVE_PRINT_LIST_MODEL_EVENT, ComBusRequestEvent);
+wxDECLARE_EVENT(COM_LIKE_MODEL_EVENT, ComBusRequestEvent);
 wxDECLARE_EVENT(COM_REPORT_MODEL_EVENT, ComBusRequestEvent);
 wxDECLARE_EVENT(COM_BUS_GET_REQUEST_EVENT, ComBusGetRequestEvent);
 wxDECLARE_EVENT(COM_BUS_POST_REQUEST_EVENT, ComBusPostRequestEvent);
 wxDECLARE_EVENT(COM_CONN_SYS_NOTIFY_EVENT, ComConnSysNotifyEvent);
+wxDECLARE_EVENT(COM_CONN_UPDATE_NOTIFY_EVENT, ComConnSysNotifyEvent);
+wxDECLARE_EVENT(COM_CONN_CLOUD_SLICE_EVENT, ComCloudSliceUpdateEvent);
+wxDECLARE_EVENT(COM_CONN_JOB_INFO_EVENT, ComJobInfoUpdateEvent);
 
 }} // namespace Slic3r::GUI
 

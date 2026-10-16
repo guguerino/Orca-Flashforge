@@ -27,8 +27,11 @@ class CMLoadGlb
 {
 public:
     bool loadGlb(const wxString &glbPath, in_model_data_t &inData, glb_data_t &glbData);
+    bool loadGltf(const wxString &gltfPath, in_model_data_t &inData, glb_data_t &glbData);
 
 private:
+    bool load(const wxString &path, bool binary, in_model_data_t &inData, glb_data_t &glbData);
+
     struct indices_info_t {
         int maxIndex;
         int cnt;
@@ -38,11 +41,16 @@ private:
 
     Eigen::Matrix4f getNodeMatrix(const tinygltf::Node &node);
 
-    bool addIndices(const tinygltf::Model &model, int mode, int accessorIdx, glb_data_t &glbData,
+    bool getPrimitiveVertexCount(const tinygltf::Model &model, const tinygltf::Primitive &primitive,
+        int &vertexCnt);
+
+    bool addIndices(const tinygltf::Model &model, int mode, int accessorIdx, int vertexCnt, glb_data_t &glbData,
         indices_info_t &info);
 
     template<typename Ty>
     void addIndices(Ty indices, int cnt, int mode, glb_data_t &glbData, indices_info_t &info);
+
+    void addSequentialIndices(int cnt, int mode, glb_data_t &glbData, indices_info_t &info);
 
     bool addMaterial(const tinygltf::Model &model, int materialIdx, in_model_data_t &inData,
         glb_data_t &glbData);
@@ -51,6 +59,10 @@ private:
 
     bool addNewTexture(const tinygltf::Model &model, int textureIdx, const tinygltf::Image &image,
         glb_data_t &glbData);
+
+    bool addSolidColorMaterial(const tinygltf::Model &model, int materialIdx, glb_data_t &glbData);
+
+    cvt_color_t getMaterialColor(const tinygltf::Model &model, int materialIdx);
 
     bool getWrapType(const tinygltf::Model &model, int textureIdx, texture_wrap_type_t wrap[2]);
 
@@ -65,6 +77,7 @@ private:
     std::vector<int32_t> m_pointIndexMap;
     ConvertModelUtils::point_map_t m_pointMap;
     std::map<int, int> m_textrueIndexMap;
+    std::map<cvt_color_t, int> m_colorIndexMap;
 };
 
 }} // namespace Slic3r::GUI

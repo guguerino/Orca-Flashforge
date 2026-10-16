@@ -1,26 +1,87 @@
 #include "CMLoadGlb.hpp"
+#include <algorithm>
+#include <cstring>
+#include <limits>
 #include <boost/log/trivial.hpp>
 
 namespace Slic3r { namespace GUI {
 
+namespace {
+
+bool accessor_layout(const tinygltf::Model &model, const tinygltf::Accessor &accessor, int components,
+                     const uint8_t *&data, int &stride)
+{
+    if (accessor.sparse.isSparse || tinygltf::GetNumComponentsInType(accessor.type) != components ||
+        accessor.bufferView < 0 || accessor.bufferView >= model.bufferViews.size())
+        return false;
+    const tinygltf::BufferView &view = model.bufferViews[accessor.bufferView];
+    if (view.buffer < 0 || view.buffer >= model.buffers.size())
+        return false;
+    const int component_size = tinygltf::GetComponentSizeInBytes(accessor.componentType);
+    stride = accessor.ByteStride(view);
+    if (component_size <= 0 || stride < component_size * components)
+        return false;
+    const std::vector<unsigned char> &buffer = model.buffers[view.buffer].data;
+    const size_t offset = view.byteOffset + accessor.byteOffset;
+    const size_t element_size = static_cast<size_t>(component_size) * components;
+    if (offset > buffer.size() || element_size > buffer.size() - offset ||
+        (accessor.count > 0 && accessor.count - 1 > (buffer.size() - offset - element_size) / static_cast<size_t>(stride)))
+        return false;
+    data = buffer.data() + offset;
+    return true;
+}
+
+float read_texcoord_component(const uint8_t *data, int component_type)
+{
+    if (component_type == TINYGLTF_COMPONENT_TYPE_FLOAT) {
+        float value;
+        std::memcpy(&value, data, sizeof(value));
+        return value;
+    }
+    if (component_type == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE)
+        return static_cast<float>(*data) / 255.f;
+    uint16_t value;
+    std::memcpy(&value, data, sizeof(value));
+    return static_cast<float>(value) / 65535.f;
+}
+
+} // namespace
+
 bool CMLoadGlb::loadGlb(const wxString &glbPath, in_model_data_t &inData, glb_data_t &glbData)
+{
+    return load(glbPath, true, inData, glbData);
+}
+
+bool CMLoadGlb::loadGltf(const wxString &gltfPath, in_model_data_t &inData, glb_data_t &glbData)
+{
+    return load(gltfPath, false, inData, glbData);
+}
+
+bool CMLoadGlb::load(const wxString &path, bool binary, in_model_data_t &inData, glb_data_t &glbData)
 {
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
-    if (!loader.LoadBinaryFromFile(&model, &err, &warn, glbPath.utf8_string())) {
-        BOOST_LOG_TRIVIAL(error) << "load glb error, " << err << ", " << glbPath.utf8_string();
+    const bool loaded = binary ? loader.LoadBinaryFromFile(&model, &err, &warn, path.utf8_string()) :
+                                 loader.LoadASCIIFromFile(&model, &err, &warn, path.utf8_string());
+    if (!warn.empty())
+        BOOST_LOG_TRIVIAL(warning) << "load glTF warning, " << warn << ", " << path.utf8_string();
+    if (!loaded) {
+        BOOST_LOG_TRIVIAL(error) << "load glTF error, " << err << ", " << path.utf8_string();
         return false;
     }
     m_baseIndex = 0;
     m_pointIndexMap.clear();
     m_pointMap.clear();
     m_textrueIndexMap.clear();
-    if (model.defaultScene < 0 || model.defaultScene >= model.scenes.size()) {
-        BOOST_LOG_TRIVIAL(warning) << "invalid glb scene, " << model.defaultScene;
+    m_colorIndexMap.clear();
+    m_nodeParentSet.clear();
+    const int scene_index = model.defaultScene >= 0 ? model.defaultScene : (model.scenes.empty() ? -1 : 0);
+    if (scene_index < 0 || scene_index >= model.scenes.size()) {
+        BOOST_LOG_TRIVIAL(warning) << "invalid glTF scene, " << scene_index;
         return false;
     }
-    for (auto node : model.scenes[model.defaultScene].nodes) {
+    for (int node : model.scenes[scene_index].nodes) {
         if (!addNode(model, node, Eigen::Matrix4f::Identity(), inData, glbData)) {
             return false;
         }
@@ -44,8 +105,16 @@ bool CMLoadGlb::addNode(const tinygltf::Model &model, int nodeIdx, const Eigen::
             return true;
         }
         for (auto &primitive : model.meshes[node.mesh].primitives) {
+            int vertexCnt = 0;
+            if (!getPrimitiveVertexCount(model, primitive, vertexCnt)) {
+                return false;
+            }
+            if (vertexCnt > std::numeric_limits<int>::max() - m_baseIndex) {
+                BOOST_LOG_TRIVIAL(error) << "glTF scene has too many vertices";
+                return false;
+            }
             indices_info_t info;
-            if (!addIndices(model, primitive.mode, primitive.indices, glbData, info)) {
+            if (!addIndices(model, primitive.mode, primitive.indices, vertexCnt, glbData, info)) {
                 return false;
             }
             if (info.cnt <= 0) {
@@ -96,20 +165,49 @@ Eigen::Matrix4f CMLoadGlb::getNodeMatrix(const tinygltf::Node &node)
     return transform.matrix();
 }
 
-bool CMLoadGlb::addIndices(const tinygltf::Model &model, int mode, int accessorIdx, glb_data_t &glbData,
+bool CMLoadGlb::getPrimitiveVertexCount(const tinygltf::Model &model, const tinygltf::Primitive &primitive,
+    int &vertexCnt)
+{
+    vertexCnt = 0;
+    auto vertexIt = primitive.attributes.find("POSITION");
+    if (vertexIt == primitive.attributes.end()) {
+        BOOST_LOG_TRIVIAL(error) << "can't find glb vertex";
+        return false;
+    }
+    if (vertexIt->second < 0 || vertexIt->second >= model.accessors.size()) {
+        BOOST_LOG_TRIVIAL(error) << "invalid glb accessor, " << vertexIt->second;
+        return false;
+    }
+    const size_t count = model.accessors[vertexIt->second].count;
+    if (count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        BOOST_LOG_TRIVIAL(error) << "glTF primitive has too many vertices";
+        return false;
+    }
+    vertexCnt = static_cast<int>(count);
+    return true;
+}
+
+bool CMLoadGlb::addIndices(const tinygltf::Model &model, int mode, int accessorIdx, int vertexCnt, glb_data_t &glbData,
     indices_info_t &info)
 {
     info.maxIndex = 0;
     info.cnt = 0;
+    if (mode == -1) {
+        mode = TINYGLTF_MODE_TRIANGLES;
+    }
     if (mode != TINYGLTF_MODE_TRIANGLES && mode != TINYGLTF_MODE_TRIANGLE_FAN
      && mode != TINYGLTF_MODE_TRIANGLE_STRIP) {
         return true;
     }
     if (accessorIdx < 0 || accessorIdx >= model.accessors.size()) {
-        BOOST_LOG_TRIVIAL(error) << "invalid glb accessor, " << accessorIdx;
-        return false;
+        addSequentialIndices(vertexCnt, mode, glbData, info);
+        return true;
     }
     auto &indexAccessor = model.accessors[accessorIdx];
+    if (indexAccessor.sparse.isSparse || indexAccessor.type != TINYGLTF_TYPE_SCALAR) {
+        BOOST_LOG_TRIVIAL(error) << "unsupported sparse or non-scalar glTF index accessor";
+        return false;
+    }
     if (indexAccessor.bufferView < 0 || indexAccessor.bufferView >= model.bufferViews.size()) {
         BOOST_LOG_TRIVIAL(error) << "invalid glb bufferView, " << indexAccessor.bufferView;
         return false;
@@ -117,20 +215,56 @@ bool CMLoadGlb::addIndices(const tinygltf::Model &model, int mode, int accessorI
     if (indexAccessor.count < 3) {
         return true;
     }
+    if (indexAccessor.count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        BOOST_LOG_TRIVIAL(error) << "glTF primitive has too many indices";
+        return false;
+    }
     auto &indexView = model.bufferViews[indexAccessor.bufferView];
     if (indexView.buffer < 0 || indexView.buffer >= model.buffers.size()) {
         BOOST_LOG_TRIVIAL(error) << "invalid glb buffer, " << indexView.buffer;
         return false;
     }
-    auto indexData = &model.buffers[indexView.buffer].data[indexAccessor.byteOffset + indexView.byteOffset];
-    if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-        addIndices((const uint32_t *)indexData, indexAccessor.count, mode, glbData, info);
-    } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
-        addIndices((const uint16_t *)indexData, indexAccessor.count, mode, glbData, info);
-    } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
-        addIndices((const uint8_t *)indexData, indexAccessor.count, mode, glbData, info);
+    const int component_size = tinygltf::GetComponentSizeInBytes(indexAccessor.componentType);
+    const int stride = indexAccessor.ByteStride(indexView);
+    const size_t offset = indexAccessor.byteOffset + indexView.byteOffset;
+    const auto &buffer = model.buffers[indexView.buffer].data;
+    if (component_size <= 0 || stride < component_size || offset > buffer.size() ||
+        static_cast<size_t>(component_size) > buffer.size() - offset ||
+        (indexAccessor.count > 0 && indexAccessor.count - 1 >
+            (buffer.size() - offset - component_size) / static_cast<size_t>(stride))) {
+        BOOST_LOG_TRIVIAL(error) << "invalid glTF index accessor layout";
+        return false;
     }
+    std::vector<uint32_t> indices(indexAccessor.count);
+    for (size_t i = 0; i < indexAccessor.count; ++i) {
+        const uint8_t *source = buffer.data() + offset + i * stride;
+        if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)
+            std::memcpy(&indices[i], source, sizeof(uint32_t));
+        else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+            uint16_t value;
+            std::memcpy(&value, source, sizeof(value));
+            indices[i] = value;
+        } else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE)
+            indices[i] = *source;
+        else {
+            BOOST_LOG_TRIVIAL(error) << "unsupported glTF index component type, " << indexAccessor.componentType;
+            return false;
+        }
+    }
+    addIndices(indices.data(), static_cast<int>(indices.size()), mode, glbData, info);
     return true;
+}
+
+void CMLoadGlb::addSequentialIndices(int cnt, int mode, glb_data_t &glbData, indices_info_t &info)
+{
+    if (cnt < 3) {
+        return;
+    }
+    std::vector<int32_t> indices(cnt);
+    for (int i = 0; i < cnt; ++i) {
+        indices[i] = i;
+    }
+    addIndices(indices.data(), cnt, mode, glbData, info);
 }
 
 template<typename Ty>
@@ -180,7 +314,7 @@ bool CMLoadGlb::addMaterial(const tinygltf::Model &model, int materialIdx, in_mo
 {
     int textureIdx = -1;
     if (!getTextureIndex(model, materialIdx, textureIdx)) {
-        return false;
+        return addSolidColorMaterial(model, materialIdx, glbData);
     }
     int imageIdx = model.textures[textureIdx].source;
     if (imageIdx < 0 || imageIdx >= model.images.size()) {
@@ -203,6 +337,64 @@ bool CMLoadGlb::addMaterial(const tinygltf::Model &model, int materialIdx, in_mo
         glbData.materialDatas.push_back({ endTriangleIndex, &glbData.textureDatas[pair.first->second] });
     }
     return true;
+}
+
+bool CMLoadGlb::addSolidColorMaterial(const tinygltf::Model &model, int materialIdx, glb_data_t &glbData)
+{
+    cvt_color_t color = getMaterialColor(model, materialIdx);
+    auto pair = m_colorIndexMap.emplace(color, glbData.textureDatas.size());
+    if (pair.second) {
+        glbData.multiTextureBits.emplace_back(std::vector<uint8_t>{ color[0], color[1], color[2] });
+        glbData.textureDatas.emplace_back();
+        glbData.textureDatas.back().bits = glbData.multiTextureBits.back().data();
+        glbData.textureDatas.back().width = 1;
+        glbData.textureDatas.back().height = 1;
+        glbData.textureDatas.back().channels = 3;
+        glbData.textureDatas.back().bytePerLine = 3;
+        glbData.textureDatas.back().wraps[0] = TEX_WRAP_REPEAT;
+        glbData.textureDatas.back().wraps[1] = TEX_WRAP_REPEAT;
+        glbData.textureDatas.back().flipY = false;
+        glbData.textureDatas.back().isSolidColor = true;
+        glbData.textureDatas.back().solidColor = { color[0], color[1], color[2], 255 };
+    }
+    int textureDataIdx = pair.first->second;
+    if (!glbData.materialDatas.empty()
+     && &glbData.textureDatas[textureDataIdx] == glbData.materialDatas.back().textureData) {
+        glbData.materialDatas.back().endTriangleIndex = glbData.texCoordIndices.size() / 3;
+    } else {
+        int32_t endTriangleIndex = glbData.texCoordIndices.size() / 3;
+        glbData.materialDatas.push_back({ endTriangleIndex, &glbData.textureDatas[textureDataIdx] });
+    }
+    return true;
+}
+
+cvt_color_t CMLoadGlb::getMaterialColor(const tinygltf::Model &model, int materialIdx)
+{
+    cvt_color_t color = { 255, 255, 255 };
+    auto setFromFactor = [&color](const std::vector<double> &factor) {
+        if (factor.size() < 3) {
+            return;
+        }
+        for (int i = 0; i < 3; ++i) {
+            color[i] = static_cast<uint8_t>(std::max(0.0, std::min(1.0, factor[i])) * 255.0);
+        }
+    };
+    if (materialIdx < 0 || materialIdx >= model.materials.size()) {
+        return color;
+    }
+    const tinygltf::Material &material = model.materials[materialIdx];
+    setFromFactor(material.pbrMetallicRoughness.baseColorFactor);
+    auto it = material.extensions.find("KHR_materials_pbrSpecularGlossiness");
+    if (it != material.extensions.end() && it->second.Has("diffuseFactor")
+     && it->second.Get("diffuseFactor").IsArray()) {
+        std::vector<double> diffuseFactor;
+        const tinygltf::Value::Array &array = it->second.Get("diffuseFactor").Get<tinygltf::Value::Array>();
+        for (const tinygltf::Value &value : array) {
+            diffuseFactor.push_back(value.GetNumberAsDouble());
+        }
+        setFromFactor(diffuseFactor);
+    }
+    return color;
 }
 
 bool CMLoadGlb::getTextureIndex(const tinygltf::Model &model, int materialIdx, int &textureIdx)
@@ -270,8 +462,10 @@ bool CMLoadGlb::getWrapType(const tinygltf::Model &model, int textureIdx, textur
         return true;
     };
     int samperIdx = model.textures[textureIdx].sampler;
-    if (samperIdx < 0 || samperIdx < model.samplers.size()) {
-        return TEX_WRAP_REPEAT;
+    if (samperIdx < 0 || samperIdx >= model.samplers.size()) {
+        wrap[0] = TEX_WRAP_REPEAT;
+        wrap[1] = TEX_WRAP_REPEAT;
+        return true;
     }
     return setWrap(model.samplers[samperIdx].wrapS, wrap[0])
         && setWrap(model.samplers[samperIdx].wrapT, wrap[1]);
@@ -290,57 +484,59 @@ bool CMLoadGlb::addCoords(const tinygltf::Model &model, const tinygltf::Primitiv
         return false;
     }
     auto &vertexAccessor = model.accessors[vertexIt->second];
-    if (vertexAccessor.bufferView < 0 || vertexAccessor.bufferView >= model.bufferViews.size()) {
-        BOOST_LOG_TRIVIAL(error) << "invalid glb bufferView, " << vertexAccessor.bufferView;
-        return false;
-    }
-    auto &vertexView = model.bufferViews[vertexAccessor.bufferView];
-    if (vertexView.buffer < 0 || vertexView.buffer >= model.buffers.size()) {
-        BOOST_LOG_TRIVIAL(error) << "invalid glb buffer, " << vertexView.buffer;
-        return false;
-    }
-    auto texCoordIt = primitive.attributes.find("TEXCOORD_0");
-    if (texCoordIt == primitive.attributes.end()) {
-        BOOST_LOG_TRIVIAL(error) << "can't find glb texture coord";
-        return false;
-    }
-    if (texCoordIt->second < 0 || texCoordIt->second >= model.accessors.size()) {
-        BOOST_LOG_TRIVIAL(error) << "invalid glb accessor, " << texCoordIt->second;
-        return false;
-    }
-    auto &texCoordAccessor = model.accessors[texCoordIt->second];
-    if (texCoordAccessor.bufferView < 0 || texCoordAccessor.bufferView >= model.bufferViews.size()) {
-        BOOST_LOG_TRIVIAL(error) << "invalid glb bufferView, " << texCoordAccessor.bufferView;
-        return false;
-    }
-    auto &texCoordView = model.bufferViews[texCoordAccessor.bufferView];
-    if (texCoordView.buffer < 0 || texCoordView.buffer >= model.buffers.size()) {
-        BOOST_LOG_TRIVIAL(error) << "invalid glb buffer, " << texCoordView.buffer;
+    const uint8_t *vertexData = nullptr;
+    int vertexStride = 0;
+    if (vertexAccessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT ||
+        !accessor_layout(model, vertexAccessor, 3, vertexData, vertexStride)) {
+        BOOST_LOG_TRIVIAL(error) << "unsupported glTF POSITION accessor layout";
         return false;
     }
     if (info.maxIndex >= vertexAccessor.count) {
         BOOST_LOG_TRIVIAL(error) << "glb index out of range, " << info.maxIndex;
         return false;
     }
-    if (vertexAccessor.count != texCoordAccessor.count) {
-        BOOST_LOG_TRIVIAL(error) << "invalid vertex/texture coord count, " << vertexAccessor.count
-            << "/" << texCoordAccessor.count;
-        return false;
-    }
-    auto vertexData = (const float*)&model.buffers[vertexView.buffer].data[
-        vertexAccessor.byteOffset + vertexView.byteOffset];
     for (int i = 0; i < vertexAccessor.count; ++i) {
-        Eigen::Vector4f pos(vertexData[i * 3], vertexData[i * 3 + 1], vertexData[i * 3 + 2], 1.0f);
+        float coords[3];
+        std::memcpy(coords, vertexData + static_cast<size_t>(i) * vertexStride, sizeof(coords));
+        Eigen::Vector4f pos(coords[0], coords[1], coords[2], 1.0f);
         pos = matrix * pos;
         std::array<float, 3> vertex = { pos[0], pos[1], pos[2] };
         auto pointIt = m_pointMap.emplace(vertex, m_pointMap.size()).first;
         m_pointIndexMap.push_back(pointIt->second);
     }
-    auto texCoordData = (const float*)&model.buffers[texCoordView.buffer].data[
-        texCoordAccessor.byteOffset + texCoordView.byteOffset];
-    for (int i = 0; i < texCoordAccessor.count; ++i) {
-        glbData.texCoords.push_back(texCoordData[i * 2]);
-        glbData.texCoords.push_back(texCoordData[i * 2 + 1]);
+    auto texCoordIt = primitive.attributes.find("TEXCOORD_0");
+    if (texCoordIt == primitive.attributes.end()) {
+        for (int i = 0; i < vertexAccessor.count; ++i) {
+            glbData.texCoords.push_back(0.0f);
+            glbData.texCoords.push_back(0.0f);
+        }
+    } else {
+        if (texCoordIt->second < 0 || texCoordIt->second >= model.accessors.size()) {
+            BOOST_LOG_TRIVIAL(error) << "invalid glb accessor, " << texCoordIt->second;
+            return false;
+        }
+        auto &texCoordAccessor = model.accessors[texCoordIt->second];
+        if (vertexAccessor.count != texCoordAccessor.count) {
+            BOOST_LOG_TRIVIAL(error) << "invalid vertex/texture coord count, " << vertexAccessor.count
+                << "/" << texCoordAccessor.count;
+            return false;
+        }
+        const bool valid_component = texCoordAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT ||
+                                     ((texCoordAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
+                                       texCoordAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) &&
+                                      texCoordAccessor.normalized);
+        const uint8_t *texCoordData = nullptr;
+        int texCoordStride = 0;
+        if (!valid_component || !accessor_layout(model, texCoordAccessor, 2, texCoordData, texCoordStride)) {
+            BOOST_LOG_TRIVIAL(error) << "unsupported glTF TEXCOORD_0 accessor layout";
+            return false;
+        }
+        const int component_size = tinygltf::GetComponentSizeInBytes(texCoordAccessor.componentType);
+        for (int i = 0; i < texCoordAccessor.count; ++i) {
+            const uint8_t *element = texCoordData + static_cast<size_t>(i) * texCoordStride;
+            glbData.texCoords.push_back(read_texcoord_component(element, texCoordAccessor.componentType));
+            glbData.texCoords.push_back(read_texcoord_component(element + component_size, texCoordAccessor.componentType));
+        }
     }
     m_baseIndex += vertexAccessor.count;
     return true;

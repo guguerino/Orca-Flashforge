@@ -6,7 +6,7 @@
 
 body
 {
-	background-color:#3E3E45;
+	background-color:#2D2D31; /* ORCA match background color */
 	color: #efeff0;
 }
 
@@ -21,19 +21,6 @@ body
 #Title div
 {
 	color: #009688;
-}
-
-/*-----Button-----*/
-.GrayBtn
-{
-	border: 1px solid #B9B9BC;
-	color: #B9B9BC;	
-}
-
-.GrayBtn:hover
-{
-	background-color:#E8E8E8;
-	color: #565656;
 }
 
 /*-------Text------*/

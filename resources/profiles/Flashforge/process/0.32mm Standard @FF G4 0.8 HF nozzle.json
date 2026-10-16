@@ -11,6 +11,7 @@
     "filter_out_gap_fill": "0.1",
     "flush_into_support": "1",
     "from": "system",
+    "setting_id": "wAaVfZTSRJ39STVa",
     "instantiation": "true",
     "compatible_printers": [
         "Flashforge Guider4 0.8 HF nozzle"
@@ -40,8 +41,6 @@
     "overhang_2_4_speed": "50",
     "overhang_3_4_speed": "30",
     "overhang_4_4_speed": "12",
-    "prime_tower_brim_width": "6",
-    "prime_volume": "70",
     "print_settings_id": "0.32mm Standard @FF G4 0.8 HF nozzle",
     "role_based_wipe_speed": "0",
     "skirt_loops": "0",
@@ -61,9 +60,24 @@
     "top_surface_line_width": "0.82",
     "travel_acceleration": "20000",
     "travel_speed": "550",
-    "version": "2.1.1.0",
     "wipe_speed": "50",
     "wipe_tower_bridging": "10",
     "wipe_tower_cone_angle": "10",
-    "wipe_tower_extra_spacing": "110%"
+    "wipe_tower_extra_spacing": "110%",
+
+    "enable_tower_interface_features": "1",
+    "ooze_prevention": "0",
+    "prime_tower_brim_width": "-1",
+    "prime_tower_infill_gap": "165%",
+    "prime_tower_skip_points": "0",
+    "prime_tower_width": "35",
+    "prime_volume": "40",
+    "print_extruder_id": [
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard"
+    ],
+    "version": "2.1.1.0",
+    "wipe_tower_wall_type": "rib"
 }

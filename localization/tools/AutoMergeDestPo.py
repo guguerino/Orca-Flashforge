@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 import PoRW
@@ -54,10 +55,24 @@ def _appendPo(orcaFilePath, ffFilePath, dstFilePath):
         raise(MyException("duplicate msgid"))
     _appendFile(orcaFilePath, ffFilePath, dstFilePath)
 
+def _compileMo(poPath, moPath):
+    appDir = os.path.dirname(os.path.abspath(__file__))
+    msgfmtExe = os.path.normpath(os.path.join(appDir, "../../tools/msgfmt.exe"))
+    if os.path.exists(msgfmtExe):
+        msgfmtCmd = msgfmtExe
+    else:
+        msgfmtCmd = "msgfmt"
+    return subprocess.run(
+        [msgfmtCmd, "--check-format", "-o", moPath, poPath],
+        capture_output=True, text=True
+    )
+
 if __name__ == "__main__":
     try:
         appDir = os.path.dirname(os.path.abspath(__file__))
-        for lan in ["de", "en", "es", "fr", "ja", "ko", "lt", "ru", "zh_CN"]:
+        successLangs = []
+        failedLangs = []
+        for lan in ["de", "en", "es", "fr", "ja", "ko", "ru", "tr", "zh_CN"]:
             orcaFileName = "OrcaSlicer_%s.po" % lan
             ffFileName = "flashforge_%s.po" % lan
             replaceFileName = "orca_%s.po" % lan
@@ -67,15 +82,30 @@ if __name__ == "__main__":
             replaceFilePath = os.path.join(appDir, "../flashforge", lan, replaceFileName)
             dstFilePath = os.path.join(appDir, "../../resources/i18n", lan, dstFileName)
             moFilePath = os.path.join(appDir, "../../resources/i18n", lan, "Orca-Flashforge.mo")
-            if lan in ["de", "en", "es", "fr", "ja", "ko", "zh_CN"]:
+            if lan in ["de", "en", "es", "fr", "ja", "ko", "ru", "tr", "zh_CN"]:
                 _replaceMsgStr(orcaFilePath, replaceFilePath)
             if os.path.exists(orcaFilePath):
                 _appendPo(orcaFilePath, ffFilePath, dstFilePath)
             else:
                 shutil.copy(ffFilePath, dstFilePath)
+            result = _compileMo(dstFilePath, moFilePath)
+            if result.returncode != 0:
+                print("[ERROR] %s: msgfmt 编译失败" % lan)
+                if result.stderr:
+                    print(result.stderr)
+                failedLangs.append(lan)
+            else:
+                successLangs.append(lan)
+        print("\n=== 编译汇总 ===")
+        print("成功编译 %d 个语言: %s" % (len(successLangs), ", ".join(successLangs)))
+        if failedLangs:
+            print("编译失败 %d 个语言: %s" % (len(failedLangs), ", ".join(failedLangs)))
+        else:
+            print("全部编译成功")
     except MyException as e:
         print(e)
         os.system("pause")
     except:
         traceback.print_exc()
-    os.system("pause")
+    if sys.stdin.isatty():
+        os.system("pause")

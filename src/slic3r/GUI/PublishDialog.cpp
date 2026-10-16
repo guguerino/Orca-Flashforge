@@ -19,12 +19,12 @@ namespace GUI {
 
 static wxString PUBLISH_STEP_STRING[STEP_COUNT] = {
     _L("Slice all plate to obtain time and filament estimation"),
-    _L("Packing project data into 3mf file"),
-    _L("Uploading 3mf"),
+    _L("Packing project data into 3MF file"),
+    _L("Uploading 3MF"),
     _L("Jump to model publish web page")
 };
 
-static wxString NOTE_STRING = _L("Note: The preparation may takes several minutes. Please be patient.");
+static wxString NOTE_STRING = _L("Note: The preparation may take several minutes. Please be patient.");
 
 PublishDialog::PublishDialog(Plater *plater)
     : DPIDialog(static_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, _L("Publish"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
@@ -140,7 +140,7 @@ void PublishDialog::cancel()
 {
     m_was_cancelled = true;
     m_btn_cancel->Enable(false);
-    m_text_progress->SetLabelText(_L("Publish was cancelled"));
+    m_text_progress->SetLabelText(_L("Publish was canceled"));
     wxCloseEvent evt;
     this->on_close(evt);
 }
@@ -185,13 +185,13 @@ void PublishDialog::SetPublishStep(PublishStep step, bool yield, int percent)
         else
             m_progress->SetValue(0);
     } else if (step == PublishStep::STEP_PACKING) {
-        m_text_progress->SetLabelText(_L("Packing data to 3mf"));
+        m_text_progress->SetLabelText(_L("Packing data to 3MF"));
         if (percent > 0)
             m_progress->SetValue(percent);
         else
             m_progress->SetValue(70);
     } else if (step == PublishStep::STEP_UPLOADING) {
-        m_text_progress->SetLabelText(_L("Packing data to 3mf"));
+        m_text_progress->SetLabelText(_L("Uploading data"));
         if (percent > 0)
             m_progress->SetValue(percent);
         else

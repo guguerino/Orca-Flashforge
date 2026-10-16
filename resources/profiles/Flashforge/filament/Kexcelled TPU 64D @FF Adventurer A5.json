@@ -1,4 +1,9 @@
 {
+    "compatible_printers": [
+        "Flashforge Adventurer A5 0.4 nozzle",
+        "Flashforge Adventurer A5 0.6 nozzle",
+        "Flashforge Adventurer A5 0.8 nozzle"
+    ],
     "cool_plate_temp": [
         "40"
     ],
@@ -14,14 +19,13 @@
     "filament_settings_id": [
         "Kexcelled TPU 64D @FF Adventurer A5"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge Adventurer A5 0.4 nozzle",
-      "Flashforge Adventurer A5 0.6 nozzle",
-      "Flashforge Adventurer A5 0.8 nozzle"
+    "filament_vendor": [
+        "Kexcelled"
     ],
+    "from": "system",
     "inherits": "Flashforge Generic TPU",
+    "setting_id": "OB4I8nwZn8sCcCcF",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Kexcelled TPU 64D @FF Adventurer A5",
     "textured_plate_temp": [

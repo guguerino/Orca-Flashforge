@@ -2,6 +2,9 @@
     "additional_cooling_fan_speed": [
         "40"
     ],
+    "compatible_printers": [
+        "Flashforge Guider4 Pro 0.4 nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "40"
     ],
@@ -26,12 +29,13 @@
     "filament_settings_id": [
         "kexcelled TPU 64D @FF G4P"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge Guider4 Pro 0.4 nozzle"
+    "filament_vendor": [
+        "Kexcelled"
     ],
+    "from": "system",
     "inherits": "Flashforge Generic TPU",
+    "setting_id": "s0hK4FbFmjbpYt7B",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "kexcelled TPU 64D @FF G4P",
     "nozzle_temperature": [

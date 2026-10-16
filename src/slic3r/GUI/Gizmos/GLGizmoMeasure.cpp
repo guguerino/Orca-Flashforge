@@ -4,6 +4,7 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/Gizmos/GizmoObjectManipulation.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+#include "GLGizmoUtils.hpp"
 
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/MeasureUtils.hpp"
@@ -12,7 +13,7 @@
 
 #include <numeric>
 
-#include <GL/glew.h>
+#include <glad/gl.h>
 
 #include <tbb/parallel_for.h>
 
@@ -90,9 +91,14 @@ Vec3d GLGizmoMeasure::get_feature_offset(const Measure::SurfaceFeature &feature)
     }
     case Measure::SurfaceFeatureType::Edge:
     {
-        std::optional<Vec3d> p = feature.get_extra_point();
-        assert(p.has_value());
-        ret = *p;
+        // Only polygon edges store an extra point (the polygon centre); plain edges have none.
+        const std::optional<Vec3d> extra = feature.get_extra_point();
+        if (extra.has_value())
+            ret = *extra;
+        else {
+            const auto [pt1, pt2] = feature.get_edge();
+            ret = 0.5 * (pt1 + pt2);
+        }
         break;
     }
     case Measure::SurfaceFeatureType::Point:
@@ -444,13 +450,14 @@ bool GLGizmoMeasure::on_init()
 {
     m_shortcut_key = WXK_CONTROL_U;
 
-    m_desc["feature_selection"]         = _L("Select feature");
-    m_desc["point_selection_caption"]   = _L("Shift + Left mouse button");
-    m_desc["point_selection"]           = _L("Select point");
-    m_desc["reset_caption"]             = _L("Delete");
-    m_desc["reset"]                     = _L("Restart selection");
-    m_desc["unselect_caption"]          = _L("Esc");
-    m_desc["unselect"]                  = _L("Cancel a feature until exit");
+    const wxString shift = GUI::shortkey_shift_prefix();
+
+    m_shortcuts = {
+        {_L("Left mouse button"),           _L("Select")},
+        {shift + _L("Left mouse button"),   _L("Select point")},
+        {_L("Delete"),                      _L("Restart selection")},
+        {_L("Esc"),                         _L("Cancel a feature until exit")},
+    };
 
     return true;
 }
@@ -480,7 +487,7 @@ std::string GLGizmoMeasure::on_get_name() const
 {
     if (!on_is_activable() && m_state == EState::Off) {
         if (wxGetApp().plater()->canvas3D()->get_canvas_type() == GLCanvas3D::ECanvasType::CanvasAssembleView) {
-            return _u8L("Measure") + ":\n" + _u8L("Please confirm explosion ratio = 1,and please select at least one object");
+            return _u8L("Measure") + ":\n" + _u8L("Please confirm explosion ratio = 1, and please select at least one object.");
         }
         else {
             return _u8L("Measure") + ":\n" + _u8L("Please select at least one object.");
@@ -676,7 +683,7 @@ void GLGizmoMeasure::on_render()
                                                                                m_mesh_raycaster_map[m_last_hit_volume]->get_transform(), m_only_select_plane) :
                                                               std::nullopt;
             }
-            if (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY) {
+            if (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY && curr_feature.has_value()) {
                 if (m_assembly_mode == AssemblyMode::FACE_FACE) {
                     if (curr_feature->get_type() != Measure::SurfaceFeatureType::Plane) {
                         curr_feature.reset();
@@ -1063,7 +1070,7 @@ void GLGizmoMeasure::on_render()
 
         if (requires_raycaster_update) {
             if (m_gripper_id_raycast_map.find(GripperType::SPHERE_2) != m_gripper_id_raycast_map.end()) {
-                m_gripper_id_raycast_map[GripperType::SPHERE_2]->set_transform(Geometry::translation_transform(get_feature_offset(*m_selected_features.first.feature)) *
+                m_gripper_id_raycast_map[GripperType::SPHERE_2]->set_transform(Geometry::translation_transform(get_feature_offset(*m_selected_features.second.feature)) *
                                                                                Geometry::scale_transform(inv_zoom));
             }
         }
@@ -1182,24 +1189,30 @@ void GLGizmoMeasure::render_dimensioning()
 
         const Transform3d ss_to_ndc_matrix = TransformHelper::ndc_to_ss_matrix_inverse(viewport);
 
-#if ENABLE_GL_CORE_PROFILE
+#if !SLIC3R_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
             shader->stop_using();
 
-            shader = wxGetApp().get_shader("dashed_thick_lines");
+#if SLIC3R_OPENGL_ES
+            shader = wxGetApp().get_shader("dashed_lines");
+#else
+             shader = wxGetApp().get_shader("dashed_thick_lines");
+#endif // SLIC3R_OPENGL_ES
             if (shader == nullptr)
                 return;
 
             shader->start_using();
             shader->set_uniform("projection_matrix", Transform3d::Identity());
-            const std::array<int, 4>& viewport = camera.get_viewport();
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 1.0f);
             shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
         }
         else
-#endif // ENABLE_GL_CORE_PROFILE
-            glsafe(::glLineWidth(2.0f));
+             glsafe(::glLineWidth(2.0f));
+#endif // !SLIC3R_OPENGL_ES
+
         // stem
         shader->set_uniform("view_model_matrix", overlap ?
             ss_to_ndc_matrix * Geometry::translation_transform(v1ss_3) * q12ss * Geometry::translation_transform(-2.0 * TRIANGLE_HEIGHT * Vec3d::UnitX()) * Geometry::scale_transform({ v12ss_len + 4.0 * TRIANGLE_HEIGHT, 1.0f, 1.0f }) :
@@ -1207,8 +1220,9 @@ void GLGizmoMeasure::render_dimensioning()
         m_dimensioning.line.set_color(color);
         m_dimensioning.line.render();
 
-#if ENABLE_GL_CORE_PROFILE
+#if !SLIC3R_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
             shader->stop_using();
 
             shader = wxGetApp().get_shader("flat");
@@ -1216,10 +1230,11 @@ void GLGizmoMeasure::render_dimensioning()
                 return;
 
             shader->start_using();
+#if !SLIC3R_OPENGL_ES
         }
         else
-#endif // ENABLE_GL_CORE_PROFILE
             glsafe(::glLineWidth(1.0f));
+#endif // !SLIC3R_OPENGL_ES
 
         // arrow 1
         if (show_first_tri) {
@@ -1439,11 +1454,16 @@ void GLGizmoMeasure::render_dimensioning()
         }
 
         const Camera& camera = wxGetApp().plater()->get_camera();
-#if ENABLE_GL_CORE_PROFILE
+#if !SLIC3R_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
             shader->stop_using();
 
+#if SLIC3R_OPENGL_ES
+            shader = wxGetApp().get_shader("dashed_lines");
+#else
             shader = wxGetApp().get_shader("dashed_thick_lines");
+#endif // SLIC3R_OPENGL_ES
             if (shader == nullptr)
                 return;
 
@@ -1453,18 +1473,20 @@ void GLGizmoMeasure::render_dimensioning()
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 1.0f);
             shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
         }
         else
-#endif // ENABLE_GL_CORE_PROFILE
-          glsafe(::glLineWidth(2.0f));
+            glsafe(::glLineWidth(2.0f));
+#endif // !SLIC3R_OPENGL_ES
 
         // arc
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
         shader->set_uniform("view_model_matrix", camera.get_view_matrix() * Geometry::translation_transform(center));
         m_dimensioning.arc.render();
 
-#if ENABLE_GL_CORE_PROFILE
+#if !SLIC3R_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
             shader->stop_using();
 
             shader = wxGetApp().get_shader("flat");
@@ -1472,10 +1494,11 @@ void GLGizmoMeasure::render_dimensioning()
                 return;
 
             shader->start_using();
+#if !SLIC3R_OPENGL_ES
         }
         else
-#endif // ENABLE_GL_CORE_PROFILE
-          glsafe(::glLineWidth(1.0f));
+            glsafe(::glLineWidth(1.0f));
+#endif // !SLIC3R_OPENGL_ES
 
         // arrows
         auto render_arrow = [this, shader, &camera, &normal, &center, &e1_unit, draw_radius, step, resolution](unsigned int endpoint_id) {
@@ -1817,7 +1840,7 @@ void GLGizmoMeasure::show_selection_ui()
             return text;
         };
 
-        float selection_cap_length;
+        float selection_cap_length = 0;
         if (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY) {
             if (m_assembly_mode == AssemblyMode::FACE_FACE) {
                 selection_cap_length = ImGui::CalcTextSize((_u8L("Selection") + " 1" + _u8L(" (Moving)")).c_str()).x * 1.2;
@@ -1899,18 +1922,6 @@ void GLGizmoMeasure::show_selection_ui()
     if (m_show_reset_first_tip) {
         m_imgui->text(_L("Feature 1 has been reset, \nfeature 2 has been feature 1"));
     }
-    if (m_selected_wrong_feature_waring_tip) {
-        if (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY) {
-            if (m_assembly_mode == AssemblyMode::FACE_FACE) {
-                m_imgui->warning_text(_L("Warning:please select Plane's feature."));
-            } else if (m_assembly_mode == AssemblyMode::POINT_POINT) {
-                m_imgui->warning_text(_L("Warning:please select Point's or Circle's feature."));
-            }
-        }
-    }
-    if (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY && m_hit_different_volumes.size() == 1) {
-        m_imgui->warning_text(_L("Warning:please select two different mesh."));
-    }
 }
 
 void GLGizmoMeasure::show_distance_xyz_ui()
@@ -1932,35 +1943,38 @@ void GLGizmoMeasure::show_distance_xyz_ui()
         }
     };
     auto add_edit_distance_xyz_box = [this](Vec3d &distance) {
-        m_imgui->disabled_begin(m_hit_different_volumes.size() == 1);
-        {
+        //m_imgui->disabled_begin(m_hit_different_volumes.size() == 1);
+        //{
             if (m_measure_mode == EMeasureMode::ONLY_MEASURE) {
                 m_can_set_xyz_distance = false;
             }
-            m_imgui->disabled_begin(!m_can_set_xyz_distance);
+            bool volume = m_hit_different_volumes.size() == 1;
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            m_imgui->text_colored(ImGuiWrapper::COL_RED, "X:");
+            m_imgui->text_colored(ImGuiWrapper::to_ImVec4(ColorRGBA::X()), "X:"); // ORCA match axis color
             ImGui::TableSetColumnIndex(1);
             ImGui::PushItemWidth(m_input_size_max);
+            m_imgui->disabled_begin(volume || !m_can_set_xyz_distance); // ORCA disable only input box othervise axis colors rendered dimmed
             ImGui::BBLInputDouble("##measure_distance_x", &m_buffered_distance[0], 0.0f, 0.0f, "%.2f");
+            m_imgui->disabled_end();
 
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            m_imgui->text_colored(ImGuiWrapper::COL_GREEN, "Y:");
+            m_imgui->text_colored(ImGuiWrapper::to_ImVec4(ColorRGBA::Y()), "Y:"); // ORCA match axis color
             ImGui::TableSetColumnIndex(1);
+            m_imgui->disabled_begin(volume || !m_can_set_xyz_distance); // ORCA disable only input box othervise axis colors rendered dimmed
             ImGui::BBLInputDouble("##measure_distance_y", &m_buffered_distance[1], 0.0f, 0.0f, "%.2f");
             m_imgui->disabled_end();
 
-            m_imgui->disabled_begin(!(m_same_model_object && m_can_set_xyz_distance));
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            m_imgui->text_colored(ImGuiWrapper::COL_BLUE, "Z:");
+            m_imgui->text_colored(ImGuiWrapper::to_ImVec4(ColorRGBA::Z()), "Z:"); // ORCA match axis color
             ImGui::TableSetColumnIndex(1);
+            m_imgui->disabled_begin(volume || !(m_same_model_object && m_can_set_xyz_distance)); // ORCA disable only input box othervise axis colors rendered dimmed
             ImGui::BBLInputDouble("##measure_distance_z", &m_buffered_distance[2], 0.0f, 0.0f, "%.2f");
             m_imgui->disabled_end();
-        }
-        m_imgui->disabled_end();
+        //}
+        //m_imgui->disabled_end();
         if (m_last_active_item_imgui != m_current_active_imgui_id && m_hit_different_volumes.size() == 2) {
             Vec3d displacement = Vec3d::Zero();
             if (std::abs(m_buffered_distance[0] - distance[0]) > EPSILON) {
@@ -2080,7 +2094,7 @@ void GLGizmoMeasure::show_face_face_assembly_senior()
         m_selected_features.first.feature->get_type() == Measure::SurfaceFeatureType::Plane &&
         m_selected_features.second.feature->get_type() == Measure::SurfaceFeatureType::Plane) {
         auto &action                         = m_assembly_action;
-        auto  feature_text_size              = m_imgui->calc_button_size(_L("Featue 1")).x + m_imgui->calc_button_size(":").x;
+        auto  feature_text_size              = m_imgui->calc_button_size(_L("Feature 1")).x + m_imgui->calc_button_size(":").x;
         auto  set_to_reverse_rotation_size   = m_imgui->calc_button_size(_L("Reverse rotation")).x;
         auto  rotate_around_center_size      = m_imgui->calc_button_size(_L("Rotate around center:")).x;
         auto  parallel_distance_size         = m_imgui->calc_button_size(_L("Parallel distance:")).x;
@@ -2108,7 +2122,7 @@ void GLGizmoMeasure::show_face_face_assembly_senior()
                 m_buffered_around_center = 0;
             }
             ImGui::SameLine(rotate_around_center_size + m_space_size + m_input_size_max + m_space_size / 2.0f);
-            m_imgui->text(_L("°"));
+            m_imgui->text("°");
         }
     }
 }
@@ -2154,18 +2168,21 @@ void GLGizmoMeasure::on_render_input_window(float x, float y, float bottom_limit
 
     ImGui::Separator();
     show_distance_xyz_ui();
-    ImGui::Separator();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 10.0f));
-    float get_cur_y = ImGui::GetContentRegionMax().y + ImGui::GetFrameHeight() + y;
-    float caption_max    = 0.f;
-    float total_text_max = 0.f;
-    for (const auto &t : std::array<std::string, 3>{"point_selection", "reset", "unselect"}) {
-        caption_max    = std::max(caption_max, m_imgui->calc_text_size(m_desc[t + "_caption"]).x);
-        total_text_max = std::max(total_text_max, m_imgui->calc_text_size(m_desc[t]).x);
+    ImGui::Separator();
+    float f_scale = m_parent.get_gizmos_manager().get_layout_scale();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f * f_scale));
+
+    GLGizmoUtils::render_tooltip_button(m_imgui, m_parent, m_shortcuts, x, y);
+
+    ImGui::SameLine();
+    GLGizmoUtils::begin_right_aligned_buttons({ _L("Done") });
+    if (m_imgui->button(_L("Done"))) {
+        m_parent.reset_all_gizmos();
     }
-    show_tooltip_information(caption_max, x, get_cur_y);
-    ImGui::PopStyleVar(1);
+
+    ImGui::PopStyleVar(1); // ImGuiStyleVar_FramePadding
+
     if (last_feature != m_curr_feature || last_mode != m_mode || last_selected_features != m_selected_features) {
         // the dialog may have changed its size, ask for an extra frame to render it properly
         last_feature = m_curr_feature;
@@ -2216,34 +2233,6 @@ void GLGizmoMeasure::update_measurement_result()
     }
     else if (!m_selected_features.second.feature.has_value() && m_selected_features.first.feature->get_type() == Measure::SurfaceFeatureType::Circle)
         m_measurement_result = Measure::get_measurement(*m_selected_features.first.feature, Measure::SurfaceFeature(std::get<0>(m_selected_features.first.feature->get_circle())));
-}
-
-void GLGizmoMeasure::show_tooltip_information(float caption_max, float x, float y)
-{
-    ImTextureID normal_id = m_parent.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_TOOLTIP);
-    ImTextureID hover_id  = m_parent.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_TOOLTIP_HOVER);
-
-    caption_max += m_imgui->calc_text_size(": "sv).x + 35.f;
-
-    float  scale       = m_parent.get_scale();
-    ImVec2 button_size = ImVec2(25 * scale, 25 * scale); // ORCA: Use exact resolution will prevent blur on icon
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 0, 0 }); // ORCA: Dont add padding
-    ImGui::ImageButton3(normal_id, hover_id, button_size);
-
-    if (ImGui::IsItemHovered()) {
-        ImGui::BeginTooltip2(ImVec2(x, y));
-        auto draw_text_with_caption = [this, &caption_max](const wxString &caption, const wxString &text) {
-            m_imgui->text_colored(ImGuiWrapper::COL_ACTIVE, caption);
-            ImGui::SameLine(caption_max);
-            m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG, text);
-        };
-
-        for (const auto &t : std::array<std::string, 3>{"point_selection", "reset", "unselect"})
-            draw_text_with_caption(m_desc.at(t + "_caption") + ": ", m_desc.at(t));
-        ImGui::EndTooltip();
-    }
-    ImGui::PopStyleVar(2);
 }
 
 void GLGizmoMeasure::reset_all_pick()

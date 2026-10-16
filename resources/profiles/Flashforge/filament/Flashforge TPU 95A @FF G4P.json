@@ -2,6 +2,9 @@
     "additional_cooling_fan_speed": [
         "40"
     ],
+    "compatible_printers": [
+        "Flashforge Guider4 Pro 0.4 nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "40"
     ],
@@ -26,12 +29,13 @@
     "filament_settings_id": [
         "Flashforge TPU 95A @FF G4P"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-        "Flashforge Guider4 Pro 0.4 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "inherits": "Flashforge Generic TPU",
+    "setting_id": "HdoJfbQr0uwQ6Vwb",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge TPU 95A @FF G4P",
     "nozzle_temperature": [

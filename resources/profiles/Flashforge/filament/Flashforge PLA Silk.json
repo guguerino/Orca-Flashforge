@@ -2,11 +2,14 @@
     "filament_settings_id": [
         "Flashforge PLA Silk"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "inherits": "Flashforge Generic PLA-Silk",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Silk",
+    "setting_id": "vZb7BvbyVWkZv3rR",
     "version": "2.1.1.0"
 }

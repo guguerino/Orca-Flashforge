@@ -1,13 +1,16 @@
 {
-    "type": "filament",
     "filament_settings_id": [
         "Flashforge PLA Galaxy @G3U"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "inherits": "Flashforge Generic PLA @G3U",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Galaxy @G3U",
+    "setting_id": "4t4mPNL5xUF3IXfm",
+    "type": "filament",
     "version": "2.1.1.0"
 }

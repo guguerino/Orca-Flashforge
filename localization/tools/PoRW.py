@@ -20,7 +20,7 @@ def getMsgKey(msg):
         return getMsgKeyRaw(msg.msgCtxt, msg.msgId)
 
 def _procLineWithKey(lineVal, msg, attr):
-    val = getattr(msg, attr)
+    val = getattr(msg, attr, None)
     if val != None:
         return False
     if lineVal[0] != "\"" or lineVal[-1] != "\"":
@@ -54,14 +54,14 @@ def _parseMsg(msg, readVanished):
                 attr = "msgStr"
             else:
                 return False
-        elif lineTrimed.startswith("msgstr[0]") and lineTrimed[9].isspace():
-            if _procLineWithKey(lineTrimed[9:].strip(), msg, "msgStr"):
-                attr = "msgStr"
-            else:
+        elif lineTrimed.startswith("msgstr["):
+            close_bracket = lineTrimed.find("]")
+            if close_bracket < 0 or close_bracket + 1 >= len(lineTrimed) or not lineTrimed[7:close_bracket].isdigit() or not lineTrimed[close_bracket + 1].isspace():
                 return False
-        elif lineTrimed.startswith("msgstr[1]") and lineTrimed[9].isspace():
-            if _procLineWithKey(lineTrimed[9:].strip(), msg, "msgStrPlural"):
-                attr = "msgStrPlural"
+            index = int(lineTrimed[7:close_bracket])
+            attr_name = "msgStr" if index == 0 else "msgStrPlural%d" % index
+            if _procLineWithKey(lineTrimed[close_bracket + 1:].strip(), msg, attr_name):
+                attr = attr_name
             else:
                 return False
         elif lineTrimed[0] == "\"" and lineTrimed[-1] == "\"":

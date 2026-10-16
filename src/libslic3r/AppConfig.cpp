@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Format/DRC.hpp"
 #include "AppConfig.hpp"
 //BBS
 #include "Preset.hpp"
@@ -10,13 +11,14 @@
 #include "nlohmann/json.hpp"
 #include "../slic3r/Utils/Http.hpp"
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 #include <stdexcept>
+#include <sstream>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <boost/nowide/cenv.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
@@ -45,9 +47,45 @@ static const std::string MODELS_STR = "models";
 
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
 const std::string AppConfig::SECTION_MATERIALS = "sla_materials";
-const std::string AppConfig::SECTION_EMBOSS_STYLE   = "font";
+const std::string AppConfig::SECTION_EMBOSS_STYLE = "font";
 const std::string AppConfig::SECTION_LOCAL_MACHINES = "local_machines";
 
+static std::string json_value_to_string(const json& value)
+{
+    if (value.is_string())
+        return value.get<std::string>();
+    if (value.is_number_unsigned())
+        return std::to_string(value.get<unsigned long long>());
+    if (value.is_number_integer())
+        return std::to_string(value.get<long long>());
+    return {};
+}
+
+static void load_local_machine_entry(const json& p, const std::string& key, std::map<std::string, BBLocalMachine>& machines)
+{
+    if (!p.is_object())
+        return;
+
+    BBLocalMachine local_machine;
+    local_machine.dev_id = key;
+    if (p.contains("dev_id"))
+        local_machine.dev_id = json_value_to_string(p["dev_id"]);
+    if (local_machine.dev_id.empty())
+        return;
+
+    if (p.contains("dev_name"))
+        local_machine.dev_name = json_value_to_string(p["dev_name"]);
+    if (p.contains("dev_ip"))
+        local_machine.dev_ip = json_value_to_string(p["dev_ip"]);
+    if (p.contains("printer_type"))
+        local_machine.printer_type = json_value_to_string(p["printer_type"]);
+    if (p.contains("dev_placement"))
+        local_machine.dev_placement = json_value_to_string(p["dev_placement"]);
+    if (p.contains("dev_pid"))
+        local_machine.dev_pid = json_value_to_string(p["dev_pid"]);
+
+    machines[local_machine.dev_id] = local_machine;
+}
 
 AppConfig::~AppConfig()
 {
@@ -57,15 +95,15 @@ AppConfig::~AppConfig()
 std::string AppConfig::get_language_code()
 {
     std::string get_lang = get("language");
-    if (get_lang.empty())
-        return "";
+    if (get_lang.empty()) return "";
 
-    if (get_lang == "zh_CN") {
+    if (get_lang == "zh_CN")
+    {
         get_lang = "zh-cn";
-    } else {
-        if (get_lang.length() >= 2) {
-            get_lang = get_lang.substr(0, 2);
-        }
+    }
+    else
+    {
+        if (get_lang.length() >= 2) { get_lang = get_lang.substr(0, 2); }
     }
 
     return get_lang;
@@ -99,6 +137,11 @@ bool AppConfig::get_stealth_mode()
     return get_bool("stealth_mode");
 }
 
+bool AppConfig::get_hide_login_side_panel()
+{
+    return get_bool("hide_login_side_panel");
+}
+
 void AppConfig::reset()
 {
     m_storage.clear();
@@ -120,6 +163,11 @@ void AppConfig::set_defaults()
         if (get("background_processing").empty())
             set_bool("background_processing", false);
 #endif
+        if (get("auto_slice_after_change").empty())
+            set_bool("auto_slice_after_change", false);
+
+        if (get("auto_slice_change_delay_seconds").empty())
+            set("auto_slice_change_delay_seconds", "1");
 
         if (get("drop_project_action").empty())
             set_bool("drop_project_action", true);
@@ -127,6 +175,8 @@ void AppConfig::set_defaults()
 #ifdef _WIN32
         if (get("associate_3mf").empty())
             set_bool("associate_3mf", false);
+        if (get("associate_drc").empty())
+            set_bool("associate_drc", false);
         if (get("associate_stl").empty())
             set_bool("associate_stl", false);
         if (get("associate_step").empty())
@@ -137,6 +187,25 @@ void AppConfig::set_defaults()
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
             erase("app", "use_legacy_opengl");
+
+        // Migrate legacy_networking boolean to network_plugin_version string
+        std::string legacy_networking = get("legacy_networking");
+        std::string network_version = get("network_plugin_version");
+
+        if (!legacy_networking.empty()) {
+            // Old legacy_networking setting exists - migrate it
+            bool was_legacy = (legacy_networking == "true" || legacy_networking == "1");
+
+            if (was_legacy && network_version.empty()) {
+                // User had legacy mode enabled - set to legacy version number
+                BOOST_LOG_TRIVIAL(info) << "Migrating legacy_networking=true to network_plugin_version=01.10.01.01";
+                set_network_plugin_version(BAMBU_NETWORK_AGENT_VERSION_LEGACY);
+            }
+            // Note: If was_legacy=false, we leave the version empty and let the GUI layer set it to the latest version
+
+            // Remove the old setting
+            erase("app", "legacy_networking");
+        }
 
 #ifdef __APPLE__
         if (get("use_retina_opengl").empty())
@@ -174,6 +243,12 @@ void AppConfig::set_defaults()
 #endif // _WIN32
     }
 
+    if (get("seq_top_layer_only").empty())
+        set("seq_top_layer_only", "1");
+
+    if (get("filaments_area_preferred_count").empty())
+        set("filaments_area_preferred_count", "10");
+
     if (get("use_perspective_camera").empty())
         set_bool("use_perspective_camera", true);
 
@@ -186,27 +261,107 @@ void AppConfig::set_defaults()
     if (get("camera_navigation_style").empty())
         set("camera_navigation_style", "0");
 
+    if (get("left_mouse_drag_action").empty())
+        set("left_mouse_drag_action", "2");
+
+    if (get("middle_mouse_drag_action").empty())
+        set("middle_mouse_drag_action", "1");
+
+    if (get("right_mouse_drag_action").empty())
+        set("right_mouse_drag_action", "1");
+
     if (get("reverse_mouse_wheel_zoom").empty())
         set_bool("reverse_mouse_wheel_zoom", false);
+
+    if (get("enable_append_color_by_sync_ams").empty())
+        set_bool("enable_append_color_by_sync_ams", true);
+    if (get("enable_merge_color_by_sync_ams").empty())
+        set_bool("enable_merge_color_by_sync_ams", false);
+    if (get("ams_sync_match_full_use_color_dist").empty())
+        set_bool("ams_sync_match_full_use_color_dist", false);
+    if (get("sync_ams_filament_mode").empty())
+        set("sync_ams_filament_mode", "0"); // 0: filament+color, 1: color only
+
+    if (get("camera_orbit_mult").empty())
+        set("camera_orbit_mult", "1.0");
+
+    if (get(SETTING_OPENGL_AA_SAMPLES).empty())
+        set(SETTING_OPENGL_AA_SAMPLES, "4");
+
+    if (get(SETTING_OPENGL_FXAA_ENABLED).empty())
+        set_bool(SETTING_OPENGL_FXAA_ENABLED, false);
+
+    if (get(SETTING_OPENGL_FPS_CAP).empty())
+        set(SETTING_OPENGL_FPS_CAP, "0");
+    else {
+        int fps_cap = 0;
+        try {
+            fps_cap = std::stoi(get(SETTING_OPENGL_FPS_CAP));
+        }
+        catch (...) {
+            fps_cap = 0;
+        }
+        fps_cap = std::max(0, std::min(fps_cap, 240));
+        set(SETTING_OPENGL_FPS_CAP, std::to_string(fps_cap));
+    }
+
+    if (get(SETTING_OPENGL_SHOW_FPS_OVERLAY).empty())
+        set_bool(SETTING_OPENGL_SHOW_FPS_OVERLAY, false);
+
+    if (get(SETTING_OPENGL_REALISTIC_MODE).empty())
+        set_bool(SETTING_OPENGL_REALISTIC_MODE, false);
+
+    if (get(SETTING_OPENGL_REALISTIC_PHONG).empty())
+        set_bool(SETTING_OPENGL_REALISTIC_PHONG, true);
+
+    if (get(SETTING_OPENGL_SHADING_MODEL).empty())
+        set(SETTING_OPENGL_SHADING_MODEL, "gouraud");
+
+    if (get(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS).empty())
+        set_bool(SETTING_OPENGL_PHONG_BASIC_PLATE_SHADOWS, false);
+
+    if (get(SETTING_OPENGL_PHONG_SMOOTH_NORMALS).empty())
+        set_bool(SETTING_OPENGL_PHONG_SMOOTH_NORMALS, false);
+
+    if (get(SETTING_OPENGL_PHONG_SSAO).empty())
+        set_bool(SETTING_OPENGL_PHONG_SSAO, false);
+
+    if (get("export_sources_full_pathnames").empty())
+        set_bool("export_sources_full_pathnames", false);
 
     if (get("zoom_to_mouse").empty())
         set_bool("zoom_to_mouse", false);
 
 //#ifdef SUPPORT_SHOW_HINTS
-    //if (get("show_hints").empty())
+    if (get("show_hints").empty())
         set_bool("show_hints", false);
 //#endif
     if (get("enable_multi_machine").empty())
         set_bool("enable_multi_machine", false);
 
-    if (get("show_gcode_window_ff").empty())
-        set_bool("show_gcode_window_ff", false);
+    if (get("drc_bits").empty())
+        set("drc_bits", DRC_BITS_DEFAULT_STR);
+
+    if (get("show_gcode_window").empty())
+        set_bool("show_gcode_window", true);
 
     if (get("show_3d_navigator").empty())
         set_bool("show_3d_navigator", true);
 
+    if (get("show_plate_gridlines").empty())
+        set_bool("show_plate_gridlines", true);
+
     if (get("show_outline").empty())
         set_bool("show_outline", false);
+    
+    if (get("show_axes").empty())
+        set_bool("show_axes", true);
+
+    if (get("show_labels").empty())
+        set_bool("show_labels", false);
+
+    if (get("show_overhang").empty())
+        set_bool("show_overhang", false);
 
 #ifdef _WIN32
 
@@ -233,6 +388,9 @@ void AppConfig::set_defaults()
     if (get("developer_mode").empty())
         set_bool("developer_mode", false);
 
+    if (get("show_unsupported_presets").empty())
+        set_bool("show_unsupported_presets", false);
+
     if (get("enable_ssl_for_mqtt").empty())
         set_bool("enable_ssl_for_mqtt", true);
 
@@ -240,7 +398,7 @@ void AppConfig::set_defaults()
         set_bool("enable_ssl_for_ftp", true);
 
     if (get("log_severity_level").empty())
-        set("log_severity_level", "warning");
+        set("log_severity_level", "info");
 
     if (get("internal_developer_mode").empty())
         set_bool("internal_developer_mode", false);
@@ -259,6 +417,24 @@ void AppConfig::set_defaults()
     if (get("stealth_mode").empty()) {
         set_bool("stealth_mode", false);
     }
+    if (get("hide_login_side_panel").empty()) {
+        set_bool("hide_login_side_panel", false);
+    }
+    if (get("allow_abnormal_storage").empty()) {
+        set_bool("allow_abnormal_storage", false);
+    }
+
+    if (get("preset_bundle_auto_update").empty()) {
+        set_bool("preset_bundle_auto_update", false);
+    }
+
+#ifdef __linux__
+    if (get(SETTING_USE_ENCRYPTED_TOKEN_FILE).empty())
+        set_bool(SETTING_USE_ENCRYPTED_TOKEN_FILE, true);
+#else
+    if (get(SETTING_USE_ENCRYPTED_TOKEN_FILE).empty())
+        set_bool(SETTING_USE_ENCRYPTED_TOKEN_FILE, false);
+#endif
 
     if(get("check_stable_update_only").empty()) {
         set_bool("check_stable_update_only", false);
@@ -288,17 +464,45 @@ void AppConfig::set_defaults()
     if (get("show_daily_tips").empty()) {
         set_bool("show_daily_tips", true);
     }
-    //true is auto calculate
-    if (get("auto_calculate").empty()) {
-        set_bool("auto_calculate", true);
+
+    if (get("show_shared_profiles_notification").empty()) {
+        set_bool("show_shared_profiles_notification", true);
+    }
+
+    if (get("auto_calculate_flush").empty()){
+        set("auto_calculate_flush","all");
+    }
+
+    if (get("auto_generate_gradients").empty()) {
+        set_bool("auto_generate_gradients", false);
+    }
+
+    if (get("show_canvas_zoom_button").empty()) {
+        set_bool("show_canvas_zoom_button", true);
     }
 
     if (get("remember_printer_config").empty()) {
         set_bool("remember_printer_config", true);
     }
 
-    if (get("auto_calculate_when_filament_change").empty()){
-        set_bool("auto_calculate_when_filament_change", true);
+    if (get("group_filament_presets").empty()) {
+        set("group_filament_presets", "1"); // All "0" / None "1" / By Type "2" / By Vendor "3"
+    }
+
+    if (get("enable_high_low_temp_mixed_printing").empty()){
+        set_bool("enable_high_low_temp_mixed_printing", false);
+    }
+
+    if (get("ignore_ext_filament_in_filament_map").empty()){
+        set_bool("ignore_ext_filament_in_filament_map", false);
+    }
+
+    if (get("pop_up_filament_map_dialog").empty()){
+        set_bool("pop_up_filament_map_dialog", false);
+    }
+
+    if (get("prefered_filament_map_mode").empty()){
+        set("prefered_filament_map_mode",ConfigOptionEnum<FilamentMapMode>::get_enum_names()[FilamentMapMode::fmmAutoForFlush]);
     }
 
     if (get("show_home_page").empty()) {
@@ -361,6 +565,10 @@ void AppConfig::set_defaults()
         set("max_recent_count", "18");
     }
 
+    if (get("recent_models").empty()) {
+        set("recent_models", "0");
+    }
+
     // if (get("staff_pick_switch").empty()) {
     //     set_bool("staff_pick_switch", false);
     // }
@@ -415,7 +623,32 @@ void AppConfig::set_defaults()
     if (get("print", "timelapse").empty()) {
         set_str("print", "timelapse", "1");
     }
+
+    if (get("enable_step_mesh_setting").empty()) {
+        set_bool("enable_step_mesh_setting", true);
+    }
+    if (get("linear_defletion", "angle_defletion").empty()) {
+        set("linear_defletion", "0.003");
+        set("angle_defletion", "0.5");
+    }
+    if (get("is_split_compound").empty()) {
+        set_bool("is_split_compound", false);
+    }
+
     set_version_check_url();
+
+    // flashforge的云不走网络插件
+    set_bool("installed_networking", true);
+
+#ifdef __linux__
+    if (get("window_buttons_on_left").empty())
+        set_bool("window_buttons_on_left", false);
+#endif
+
+#ifdef __linux__
+    if (get("window_buttons_on_left").empty())
+        set_bool("window_buttons_on_left", false);
+#endif
 
     // Remove legacy window positions/sizes
     erase("app", "main_frame_maximized");
@@ -453,12 +686,10 @@ void AppConfig::set_version_check_url()
         })
         .perform();
 
-    p1->joinThread();
-    p2->joinThread();
-
     std::string quickerUrl = url1;
     if (t1 != -1 && t2 != -1 && t1 > t2)
         quickerUrl = url2;
+    set("version_check_url", quickerUrl);
 #else
     set("version_check_url", url2);
 #endif
@@ -642,30 +873,31 @@ std::string AppConfig::load()
                             CaliPresetInfo preset_info;
                             preset_info.tray_id     = cali_it.value()["tray_id"].get<int>();
                             preset_info.nozzle_diameter = cali_it.value()["nozzle_diameter"].get<float>();
-                            preset_info.filament_id = cali_it.value()["filament_id"].get<std::string>();
-                            preset_info.setting_id  = cali_it.value()["setting_id"].get<std::string>();
-                            preset_info.name        = cali_it.value()["name"].get<std::string>();
+                            preset_info.filament_id     = cali_it.value()["filament_id"].get<std::string>();
+                            preset_info.setting_id      = cali_it.value()["setting_id"].get<std::string>();
+                            preset_info.name            = cali_it.value()["name"].get<std::string>();
+                            if (cali_it.value().contains("extruder_id"))
+                                preset_info.extruder_id = cali_it.value()["extruder_id"].get<int>();
+                            if (cali_it.value().contains("nozzle_volume_type"))
+                                preset_info.nozzle_volume_type  = NozzleVolumeType(cali_it.value()["nozzle_volume_type"].get<int>());
+                            if (cali_it.value().contains("bed_type"))
+                                preset_info.bed_type = BedType(cali_it.value()["bed_type"].get<int>());
                             cali_info.selected_presets.push_back(preset_info);
                         }
                     }
                     m_printer_cali_infos.emplace_back(cali_info);
                 }
             } else if (it.key() == "orca_presets") {
-                for (auto &j_model : it.value()) {
+                for (auto& j_model : it.value()) {
                     m_printer_settings[j_model["machine"].get<std::string>()] = j_model;
                 }
-            } else if (it.key() == SECTION_LOCAL_MACHINES) {
-                for (auto& j_machine : it.value()) {
-                    MacInfoMap info;
-                    info.emplace(std::make_pair("dev_id", j_machine["dev_id"].get<std::string>()));
-                    info.emplace(std::make_pair("dev_name", j_machine["dev_name"].get<std::string>()));
-                    if (j_machine.find("dev_placement") != j_machine.end()) {
-                        info.emplace(std::make_pair("dev_placement", j_machine["dev_placement"].get<std::string>()));
-                    }
-                    if (j_machine.find("dev_pid") != j_machine.end()) {
-                        info.emplace(std::make_pair("dev_pid", j_machine["dev_pid"].get<std::string>()));
-                    }
-                    m_local_machines_ff.push_back(info);
+            } else if (it.key() == "local_machines") {
+                if (it.value().is_array()) {
+                    for (const auto& p : it.value())
+                        load_local_machine_entry(p, {}, m_local_machines);
+                } else if (it.value().is_object()) {
+                    for (auto m = it.value().begin(); m != it.value().end(); ++m)
+                        load_local_machine_entry(m.value(), m.key(), m_local_machines);
                 }
             } else {
                 if (it.value().is_object()) {
@@ -680,12 +912,15 @@ std::string AppConfig::load()
                             m_filament_presets = iter.value().get<std::vector<std::string>>();
                         } else if (iter.key() == "filament_colors") {
                             m_filament_colors = iter.value().get<std::vector<std::string>>();
-                        }
-                        else {
+                        } else if(iter.key() == "filament_multi_colors") {
+                           m_filament_multi_colors = iter.value().get<std::vector<std::string>>();
+                        } else if(iter.key() == "filament_color_types") {
+                           m_filament_color_types = iter.value().get<std::vector<std::string>>();
+                        } else {
                             if (iter.value().is_string())
                                 m_storage[it.key()][iter.key()] = iter.value().get<std::string>();
                             else {
-                                BOOST_LOG_TRIVIAL(trace) << "load config warning...";
+                                BOOST_LOG_TRIVIAL(warning) << "load config warning...";
                             }
                         }
                     }
@@ -719,6 +954,18 @@ std::string AppConfig::load()
             if (it_section->second.empty())
                 m_storage.erase(it_section);
         }
+
+        // Default for new installs
+        if (get(SETTING_CLOUD_PROVIDERS).empty()) {
+            // Migrate add bbl cloud if installed_networking is true
+            bool enable_bbl_cloud = get_bool("installed_networking");
+            if (enable_bbl_cloud) {
+                // Legacy Bambu-only user: give them both providers
+                set(SETTING_CLOUD_PROVIDERS, "orca;bbl");
+            } else {
+                set(SETTING_CLOUD_PROVIDERS, "orca");
+            }
+        }
     }
 
     // Override missing or keys with their defaults.
@@ -729,8 +976,10 @@ std::string AppConfig::load()
 
 void AppConfig::save()
 {
-    if (! is_main_thread_active())
+    if (!is_main_thread_active()) {
+        BOOST_LOG_TRIVIAL(fatal) << "Calling AppConfig::save() from a worker thread!";
         throw CriticalException("Calling AppConfig::save() from a worker thread!");
+    }
 
     // The config is first written to a file with a PID suffix and then moved
     // to avoid race conditions with multiple instances of Slic3r
@@ -765,6 +1014,13 @@ void AppConfig::save()
     for (const auto &filament_color : m_filament_colors) {
         j["app"]["filament_colors"].push_back(filament_color);
     }
+    for (const auto &filament_multi_color : m_filament_multi_colors) {
+       j["app"]["filament_multi_colors"].push_back(filament_multi_color);
+    }
+
+    for (const auto &filament_color_type : m_filament_color_types) {
+       j["app"]["filament_color_types"].push_back(filament_color_type);
+    }
 
     for (const auto &cali_info : m_printer_cali_infos) {
         json cali_json;
@@ -775,6 +1031,9 @@ void AppConfig::save()
         for (auto filament_preset : cali_info.selected_presets) {
             json preset_json;
             preset_json["tray_id"] = filament_preset.tray_id;
+            preset_json["extruder_id"]      = filament_preset.extruder_id;
+            preset_json["nozzle_volume_type"]  = int(filament_preset.nozzle_volume_type);
+            preset_json["bed_type"] = int(filament_preset.bed_type);
             preset_json["nozzle_diameter"]  = filament_preset.nozzle_diameter;
             preset_json["filament_id"]      = filament_preset.filament_id;
             preset_json["setting_id"]       = filament_preset.setting_id;
@@ -798,7 +1057,7 @@ void AppConfig::save()
         } else if (category.first == "presets") {
             json j_filament_array;
             for(const auto& kvp : category.second) {
-                if (boost::starts_with(kvp.first, "filament") && kvp.first != "filament_colors") {
+                if (boost::starts_with(kvp.first, "filament") && kvp.first != "filament_colors" && kvp.first != "filament_multi_colors" && kvp.first != "filament_color_types") {
                     j_filament_array.push_back(kvp.second);
                 } else {
                     j[category.first][kvp.first] = kvp.second;
@@ -843,36 +1102,34 @@ void AppConfig::save()
     for (const auto& preset : m_printer_settings) {
         j["orca_presets"].push_back(preset.second);
     }
-    
-    // write binding machines
-    for (const auto &mac : m_local_machines_ff) {
-        json j_mac;
-        auto it = mac.find("dev_id");
-        if (it != mac.end())
-            j_mac["dev_id"] = it->second;
-        it = mac.find("dev_name");
-        if (it != mac.end())
-            j_mac["dev_name"] = it->second;
-        it = mac.find("dev_placement");
-        if (it != mac.end())
-            j_mac["dev_placement"] = it->second;
-        it = mac.find("dev_pid");
-        if (it != mac.end())
-            j_mac["dev_pid"] = it->second;
-        j[SECTION_LOCAL_MACHINES].push_back(j_mac);
+    for (const auto& local_machine : m_local_machines) {
+        json m_json;
+        m_json["dev_name"]         = local_machine.second.dev_name;
+        m_json["dev_ip"]           = local_machine.second.dev_ip;
+        m_json["printer_type"]     = local_machine.second.printer_type;
+        if (!local_machine.second.dev_placement.empty())
+            m_json["dev_placement"] = local_machine.second.dev_placement;
+        if (!local_machine.second.dev_pid.empty())
+            m_json["dev_pid"] = local_machine.second.dev_pid;
+
+        j["local_machines"][local_machine.first] = m_json;
     }
     boost::nowide::ofstream c;
     c.open(path_pid, std::ios::out | std::ios::trunc);
-    c << std::setw(4) << j << std::endl;
+    c << j.dump(1, '\t') << std::endl;
 
 #ifdef WIN32
     // WIN32 specific: The final "rename_file()" call is not safe in case of an application crash, there is no atomic "rename file" API
     // provided by Windows (sic!). Therefore we save a MD5 checksum to be able to verify file corruption. In addition,
     // we save the config file into a backup first before moving it to the final destination.
-    c << appconfig_md5_hash_line(j.dump(4));
+    c << appconfig_md5_hash_line(j.dump(1, '\t'));
 #endif
 
     c.close();
+    if (c.fail()) {
+      BOOST_LOG_TRIVIAL(error) << "Failed to write new configuration to " << path_pid << "; aborting attempt to overwrite original configuration";
+      return;
+    }
 
 #ifdef WIN32
     // Make a backup of the configuration file before copying it to the final destination.
@@ -1078,6 +1335,10 @@ void AppConfig::save()
     c << appconfig_md5_hash_line(config_str);
 #endif
     c.close();
+    if (c.fail()) {
+      BOOST_LOG_TRIVIAL(error) << "Failed to write new configuration to " << path_pid << "; aborting attempt to overwrite original configuration";
+      return;
+    }
 
 #ifdef WIN32
     // Make a backup of the configuration file before copying it to the final destination.
@@ -1189,7 +1450,8 @@ void AppConfig::set_recent_projects(const std::vector<std::string>& recent_proje
     for (unsigned int i = 0; i < (unsigned int)recent_projects.size(); ++i)
     {
         auto n = std::to_string(i + 1);
-        if (n.length() == 1) n = "0" + n;
+        if (n.length() == 1) n = "00" + n;
+        else if (n.length() == 2) n = "0" + n;
         it->second[n] = recent_projects[i];
     }
 }
@@ -1347,51 +1609,44 @@ bool AppConfig::is_engineering_region(){
 
 void AppConfig::get_local_mahcines(LocalMacInfo& local_machines)
 {
-    local_machines.assign(m_local_machines_ff.begin(), m_local_machines_ff.end());
+    local_machines.clear();
+    local_machines.reserve(m_local_machines.size());
+    for (const auto& [dev_id, machine] : m_local_machines) {
+        MacInfoMap info;
+        info.emplace("dev_id", dev_id);
+        info.emplace("dev_name", machine.dev_name);
+        if (!machine.dev_placement.empty())
+            info.emplace("dev_placement", machine.dev_placement);
+        if (!machine.dev_pid.empty())
+            info.emplace("dev_pid", machine.dev_pid);
+        local_machines.emplace_back(std::move(info));
+    }
 }
 
 void AppConfig::save_bind_machine_to_config(const std::string& dev_id, const std::string& dev_name, const std::string& placement, const unsigned short& pid, bool modifyPlacement)
 {
-    bool update = false;
-    std::string pid_str = std::to_string(pid);
-    for (auto& mac : m_local_machines_ff) {
-        auto it = mac.find("dev_id");
-        if (it != mac.end() && it->second == dev_id) {
-            mac["dev_name"] = dev_name;
-            if (modifyPlacement) {
-                mac["dev_placement"] = placement;
-            }
-            mac["dev_pid"] = pid_str;
-            update = true;
-            break;
-        }
-    }
+    if (dev_id.empty())
+        return;
 
-    if (!update) {
-        MacInfoMap macInfo;
-        macInfo.emplace(std::make_pair("dev_id", dev_id));
-        macInfo.emplace(std::make_pair("dev_name", dev_name));
-        macInfo.emplace(std::make_pair("dev_placement", placement));
-        macInfo.emplace(std::make_pair("dev_pid", pid_str));
-        m_local_machines_ff.emplace_back(macInfo);
-    }
-    m_dirty = true;
+    BBLocalMachine machine;
+    auto it = m_local_machines.find(dev_id);
+    if (it != m_local_machines.end())
+        machine = it->second;
+
+    machine.dev_id = dev_id;
+    machine.dev_name = dev_name;
+    if (modifyPlacement)
+        machine.dev_placement = placement;
+    machine.dev_pid = std::to_string(pid);
+    update_local_machine(machine);
 }
 
-void AppConfig::erase_local_machine(const std::string &dev_id, const std::string &dev_name)
+void AppConfig::erase_local_machine(const std::string& dev_id, const std::string& dev_name)
 {
-    auto it_mac = m_local_machines_ff.begin();
-    for (; it_mac != m_local_machines_ff.end(); ++it_mac) {
-        const MacInfoMap &macInfo = *it_mac;
-        auto        it_id   = macInfo.find("dev_id");
-        auto        it_name = macInfo.find("dev_name");
-        if (it_id != macInfo.end() && it_name != macInfo.end()) {
-            if (it_id->second == dev_id && it_name->second == dev_name) {
-                m_local_machines_ff.erase(it_mac);
-                m_dirty = true;
-                break;
-            }
-        }
+    auto it = m_local_machines.find(dev_id);
+    if (it != m_local_machines.end() && (dev_name.empty() || it->second.dev_name == dev_name)) {
+        m_local_machines.erase(it);
+        m_dirty = true;
     }
 }
 
@@ -1428,6 +1683,163 @@ std::vector<std::string> AppConfig::get_custom_color_from_config()
     return colors;
 }
 
+void AppConfig::save_nozzle_volume_types_to_config(const std::string& printer_name, const std::string& nozzle_volume_types)
+{
+    if (!has_section("nozzle_volume_types")) {
+        std::map<std::string, std::string> data;
+        data[printer_name] = nozzle_volume_types;
+        set_section("nozzle_volume_types", data);
+    } else {
+        auto data        = get_section("nozzle_volume_types");
+        auto data_modify = const_cast<std::map<std::string, std::string>&>(data);
+        data_modify[printer_name] = nozzle_volume_types;
+        set_section("nozzle_volume_types", data_modify);
+    }
+}
+
+std::string AppConfig::get_nozzle_volume_types_from_config(const std::string& printer_name)
+{
+    std::string nozzle_volume_types;
+    if (has_section("nozzle_volume_types")) {
+        auto data        = get_section("nozzle_volume_types");
+        if (data.find(printer_name) != data.end())
+            nozzle_volume_types = data[printer_name];
+    }
+
+    return nozzle_volume_types;
+}
+
+std::string AppConfig::get_network_plugin_version() const
+{
+    return get(SETTING_NETWORK_PLUGIN_VERSION);
+}
+
+void AppConfig::set_network_plugin_version(const std::string& version)
+{
+    set(SETTING_NETWORK_PLUGIN_VERSION, version);
+}
+
+std::vector<std::string> AppConfig::get_skipped_network_versions() const
+{
+    std::vector<std::string> result;
+    std::string skipped = get(SETTING_NETWORK_PLUGIN_SKIPPED_VERSIONS);
+    if (skipped.empty())
+        return result;
+
+    std::stringstream ss(skipped);
+    std::string version;
+    while (std::getline(ss, version, ';')) {
+        if (!version.empty())
+            result.push_back(version);
+    }
+    return result;
+}
+
+void AppConfig::add_skipped_network_version(const std::string& version)
+{
+    auto skipped = get_skipped_network_versions();
+    if (std::find(skipped.begin(), skipped.end(), version) == skipped.end()) {
+        skipped.push_back(version);
+        std::string joined;
+        for (size_t i = 0; i < skipped.size(); ++i) {
+            if (i > 0) joined += ";";
+            joined += skipped[i];
+        }
+        set(SETTING_NETWORK_PLUGIN_SKIPPED_VERSIONS, joined);
+    }
+}
+
+bool AppConfig::is_network_version_skipped(const std::string& version) const
+{
+    auto skipped = get_skipped_network_versions();
+    return std::find(skipped.begin(), skipped.end(), version) != skipped.end();
+}
+
+void AppConfig::clear_skipped_network_versions()
+{
+    set(SETTING_NETWORK_PLUGIN_SKIPPED_VERSIONS, "");
+}
+
+bool AppConfig::is_network_update_prompt_disabled() const
+{
+    return get_bool(SETTING_NETWORK_PLUGIN_UPDATE_DISABLED);
+}
+
+void AppConfig::set_network_update_prompt_disabled(bool disabled)
+{
+    set_bool(SETTING_NETWORK_PLUGIN_UPDATE_DISABLED, disabled);
+}
+
+bool AppConfig::should_remind_network_update_later() const
+{
+    return get_bool(SETTING_NETWORK_PLUGIN_REMIND_LATER);
+}
+
+void AppConfig::set_remind_network_update_later(bool remind)
+{
+    set_bool(SETTING_NETWORK_PLUGIN_REMIND_LATER, remind);
+}
+
+void AppConfig::clear_remind_network_update_later()
+{
+    set_bool(SETTING_NETWORK_PLUGIN_REMIND_LATER, false);
+}
+
+std::vector<std::string> AppConfig::get_cloud_providers() const
+{
+    std::vector<std::string> result;
+    std::string providers = get(SETTING_CLOUD_PROVIDERS);
+    if (providers.empty()) {
+        result.push_back("orca");
+        return result;
+    }
+
+    std::stringstream ss(providers);
+    std::string provider;
+    while (std::getline(ss, provider, ';')) {
+        if (!provider.empty())
+            result.push_back(provider);
+    }
+    // Ensure "orca" is always present
+    if (std::find(result.begin(), result.end(), "orca") == result.end()) {
+        result.insert(result.begin(), "orca");
+    }
+    return result;
+}
+
+void AppConfig::set_cloud_providers(const std::vector<std::string>& providers)
+{
+    std::string joined;
+    for (size_t i = 0; i < providers.size(); ++i) {
+        if (i > 0) joined += ";";
+        joined += providers[i];
+    }
+    set(SETTING_CLOUD_PROVIDERS, joined);
+}
+
+bool AppConfig::has_cloud_provider(const std::string& provider) const
+{
+    auto providers = get_cloud_providers();
+    return std::find(providers.begin(), providers.end(), provider) != providers.end();
+}
+
+void AppConfig::add_cloud_provider(const std::string& provider)
+{
+    auto providers = get_cloud_providers();
+    if (std::find(providers.begin(), providers.end(), provider) == providers.end()) {
+        providers.push_back(provider);
+        set_cloud_providers(providers);
+    }
+}
+
+void AppConfig::remove_cloud_provider(const std::string& provider)
+{
+    if (provider == "orca")
+        return; // Cannot remove orca
+    auto providers = get_cloud_providers();
+    providers.erase(std::remove(providers.begin(), providers.end(), provider), providers.end());
+    set_cloud_providers(providers);
+}
 
 void AppConfig::reset_selections()
 {

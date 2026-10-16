@@ -4,16 +4,13 @@
 #include <chrono>
 #include <memory>
 #include <utility>
+#include <boost/algorithm/string/predicate.hpp>
+#include <wx/webview.h>
 #include <curl/curl.h>
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
-
-#if wxUSE_WEBVIEW_EDGE
-#include <wx/msw/webview_edge.h>
-#elif defined(__WXMAC__)
-#include <wx/osx/webview_webkit.h>
-#endif
+#include "slic3r/GUI/Widgets/WebView.hpp"
 
 namespace Slic3r::GUI
 {
@@ -24,7 +21,8 @@ std::unordered_map<unsigned short, FFPrinterPreset> FFUtils::printer_preset_map 
     {GUIDER_4,          FFPrinterPreset("guider4",           "Flashforge Guider 4",      "Flashforge-Guider4")},
     {AD5X,              FFPrinterPreset("ad5x",              "Flashforge AD5X",          "Flashforge-AD5X")}, 
     {GUIDER_4_PRO,      FFPrinterPreset("guider4_pro",       "Flashforge Guider4 Pro",   "Flashforge-Guider4-Pro")}, 
-    {U1,                FFPrinterPreset("guider_3_ultra",    "Guider 3 Ultra",           "Flashforge-U1")},
+    {C5,                FFPrinterPreset("creator_5",         "Flashforge Creator 5",     "Flashforge-Creator-5")},
+    {C5P,               FFPrinterPreset("creator_5_pro",     "Flashforge Creator 5 Pro", "Flashforge-Creator-5-Pro")},
     {ADVENTURER_A5,     FFPrinterPreset("adventurer_a5",     "Adventurer A5",            "Flashforge-Adventurer-A5")}, 
     {GUIDER_3_ULTRA,    FFPrinterPreset("guider_3_ultra",    "Guider 3 Ultra",           "Flashforge-Guider-3-Ultra")},
 };
@@ -74,6 +72,9 @@ bool FFUtils::isPrinterSupportAms(unsigned short pid)
     if (pid == AD5X || pid == GUIDER_4 || pid == GUIDER_4_PRO) {
         return true;
     }
+    if (pid == C5 || pid == C5P) {
+        return true;
+    }
     return false;
 }
 
@@ -90,13 +91,17 @@ bool FFUtils::isPrinterSupportDeviceFilter(unsigned short pid)
     if (pid == GUIDER_4 || pid == AD5X || pid == ADVENTURER_5M) {
         return false;
     }
+    if (pid == C5 || pid == C5P) {
+        return false;
+    }
     return true;
 }
 
 bool FFUtils::isNozzlesPrinter(unsigned short pid) 
 { 
     switch (pid) {
-    case U1: 
+    case C5:
+    case C5P:
         return true;
     }
     return false; 
@@ -114,7 +119,9 @@ wxString FFUtils::convertStatus(const std::string& status)
             st = _L("Paused");
         } else if ("error" == status) {
             st = _L("Error");
-        } else if ("busy" == status || "calibrate_doing" == status || "heating" == status) {
+        } else if ("busy" == status || "calibrate_doing" == status || "heating" == status || "loading" == status) {
+            st = _L("Busy");
+        } else if ("cloud_slicing" == status || "downloading" == status || "unzipping" == status || "sending" == status) {
             st = _L("Busy");
         } else if ("completed" == status || "cancel" == status) {
             st = _L("Completed");
@@ -148,7 +155,10 @@ wxString FFUtils::convertStatus(const std::string& status, wxColour& color)
         } else if ("error" == status) {
             st = _L("Error");
             color = wxColour("#FD4A29");
-        } else if ("busy" == status || "calibrate_doing" == status || "heating" == status) {
+        } else if ("busy" == status || "calibrate_doing" == status || "heating" == status || "loading" == status) {
+            st = _L("Busy");
+            color = wxColour("#F9B61C");
+        } else if ("cloud_slicing" == status || "downloading" == status || "unzipping" == status || "sending" == status) {
             st = _L("Busy");
             color = wxColour("#F9B61C");
         } else if ("completed" == status || "cancel" == status) {
@@ -539,13 +549,136 @@ long FFUtils::getHttpHeaders(const std::string &url, const std::vector<std::stri
 
 wxWebView *FFUtils::CreateWebView(wxWindow *parent)
 {
-#ifdef __WIN32__
-    return new wxWebViewEdge(parent, wxID_ANY);
-#elif defined(__WXOSX__)
-    return new wxWebViewWebKit(parent, wxID_ANY);
-#else
-    return wxWebView::New(parent, wxID_ANY);
-#endif
+    return WebView::CreateWebView(parent, wxEmptyString);
+}
+
+std::unordered_map<std::string, FFPrinterSimpleData> FFUtils::getDevListForModelId(std::string modelId, bool include_printing)
+{
+    std::unordered_map<std::string, FFPrinterSimpleData> list;
+    bool                                       valid = false;
+    com_id_list_t                              idList = MultiComMgr::inst()->getReadyDevList();
+    auto can_sync_from_status = [include_printing](const std::string &status) {
+        if (status.empty())
+            return false;
+        if (boost::algorithm::iequals(status, "ready"))
+            return true;
+        return include_printing &&
+               (boost::algorithm::iequals(status, "printing") ||
+                boost::algorithm::iequals(status, "running") ||
+                boost::algorithm::iequals(status, "prepare") ||
+                boost::algorithm::iequals(status, "slicing") ||
+                boost::algorithm::iequals(status, "pausing") ||
+                boost::algorithm::iequals(status, "pause") ||
+                boost::algorithm::iequals(status, "canceling") ||
+                boost::algorithm::iequals(status, "busy") ||
+                boost::algorithm::iequals(status, "calibrate_doing") ||
+                boost::algorithm::iequals(status, "heating") ||
+                boost::algorithm::iequals(status, "loading") ||
+                boost::algorithm::iequals(status, "cloud_slicing") ||
+                boost::algorithm::iequals(status, "downloading") ||
+                boost::algorithm::iequals(status, "unzipping") ||
+                boost::algorithm::iequals(status, "sending"));
+    };
+    for (auto id : idList) {
+        auto data = MultiComMgr::inst()->devData(id, &valid);
+        if (valid) {
+            std::string dev_id, status;
+            FFPrinterSimpleData mdata;
+            mdata.comId = id;
+            mdata.wan  = data.connectMode;
+            if (COM_CONNECT_LAN == data.connectMode) {
+                dev_id     = data.lanDevInfo.serialNumber;
+                mdata.pid  = data.lanDevInfo.pid;
+                mdata.name = wxString::FromUTF8(data.devDetail->name);
+                status     = data.devDetail->status;
+            } else if (COM_CONNECT_WAN == data.connectMode) {
+                dev_id     = data.wanDevInfo.serialNumber;
+                mdata.pid  = data.devDetail->pid;
+                mdata.name = wxString::FromUTF8(data.devDetail->name);
+                status     = data.wanDevInfo.status;
+            }
+            if (modelId != getPrinterModelId(mdata.pid)) {
+                continue;
+            }
+            if (can_sync_from_status(status)) {
+                auto iter = list.find(dev_id);
+                if (iter == list.end()) {
+                    list.emplace(dev_id, mdata);
+                } else if (COM_CONNECT_LAN == data.connectMode) {
+                    iter->second = mdata;
+                }
+            }
+        } else {
+            BOOST_LOG_TRIVIAL(warning) << "com_id (" << id << "): get com data error";
+        }
+    }
+    return list;
+}
+
+std::unordered_map<std::string, FFPrinterSimpleData> FFUtils::getSelectPresetDevList(bool include_printing)
+{
+    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle == nullptr) {
+        return {};
+    }
+    std::string model_id = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
+    return getDevListForModelId(model_id, include_printing);
+}
+
+bool FFUtils::isLikeFilament(const wxString& str) {
+    return str == "TPU";
+}
+
+namespace {
+
+std::string compact_material_text(const wxString &str)
+{
+    std::string raw = std::string(str.utf8_string());
+    std::string compact;
+    compact.reserve(raw.size());
+    for (unsigned char ch : raw) {
+        if (std::isalnum(ch))
+            compact.push_back(char(std::toupper(ch)));
+    }
+    return compact;
+}
+
+std::string canonical_material_name(const wxString &str)
+{
+    const std::string compact = compact_material_text(str);
+    if (compact.empty())
+        return {};
+
+    static constexpr const char *known_materials[] = {
+        "SUPPORT", "BVOH", "PETG", "PCTG", "HIPS", "PLA", "ABS", "ASA",
+        "TPU", "PVA", "PET", "PPS", "PA", "PC", "PP", "PE"
+    };
+
+    for (const char *material : known_materials) {
+        if (compact.find(material) != std::string::npos)
+            return material;
+    }
+    return {};
+}
+
+} // namespace
+
+bool FFUtils::matchMaterialName(const wxString& str, const wxString& originStr)
+{
+    const wxString material = str.Strip(wxString::both);
+    const wxString origin   = originStr.Strip(wxString::both);
+    if (material.empty() || origin.empty())
+        return false;
+
+    if (material.IsSameAs(origin, false))
+        return true;
+
+    const std::string material_name = canonical_material_name(material);
+    const std::string origin_name   = canonical_material_name(origin);
+    if (!material_name.empty() && !origin_name.empty())
+        return material_name == origin_name;
+
+    return compact_material_text(material) == compact_material_text(origin);
 }
 
 } // end namespace
