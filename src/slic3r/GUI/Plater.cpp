@@ -18510,7 +18510,10 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
 
     DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
     const std::string path_u8 = into_u8(path);
-    wxBusyCursor wait;
+    // The periodic auto-backup must not flash the "busy" (loading) cursor while the user is working.
+    std::unique_ptr<wxBusyCursor> wait;
+    if (!(strategy & SaveStrategy::Backup))
+        wait = std::make_unique<wxBusyCursor>();
 
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << boost::format(": path=%1%, backup=%2%, export_plate_idx=%3%, SaveStrategy=%4%")
         %output_path.string()%(strategy & SaveStrategy::Backup)%export_plate_idx %(unsigned int)strategy;

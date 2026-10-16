@@ -5892,6 +5892,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_skip_static{ false };        // not save mesh and other big static contents
         bool m_from_backup_save{ false };   // the object save is from backup store
         bool m_split_model { false };       // save object per file with Production Extention
+        // Backups are temporary files: trade size for speed (the default level made a backup of a multi-million
+        // triangle project take minutes on a single core).
+        bool m_fast_compress { false };
         bool m_save_gcode { false };        // whether to save gcode for normal save
         bool m_skip_model { false };        // skip model when exporting .gcode.3mf
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
@@ -6027,6 +6030,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     // backup mesh-only
     bool _BBS_3MF_Exporter::save_object_mesh(const std::string& temp_path, ModelObject const & object, int obj_id)
     {
+        m_fast_compress = true;   // only used by the auto-backup thread
         m_production_ext = true;
         m_from_backup_save = true;
         Model const & model = *object.get_model();
@@ -6812,9 +6816,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // GH issue #6193.
                 (uint64_t(1) << 32) - 1,
 #if WRITE_ZIP_LANGUAGE_ENCODING
-            nullptr, nullptr, 0, MZ_DEFAULT_LEVEL, nullptr, 0, nullptr, 0)) {
+            nullptr, nullptr, 0, (m_fast_compress || m_from_backup_save) ? MZ_BEST_SPEED : MZ_DEFAULT_LEVEL, nullptr, 0, nullptr, 0)) {
 #else
-            nullptr, nullptr, 0, MZ_DEFAULT_COMPRESSION, extra.c_str(), extra.length(), extra.c_str(), extra.length())) {
+            nullptr, nullptr, 0, (m_fast_compress || m_from_backup_save) ? MZ_BEST_SPEED : MZ_DEFAULT_COMPRESSION, extra.c_str(), extra.length(), extra.c_str(), extra.length())) {
 #endif
             add_error("Unable to add model file to archive");
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", Unable to add model file to archive\n");

@@ -581,8 +581,9 @@ void AppConfig::set_defaults()
         set_bool("backup_switch", true);
     }
 
+    // New installs: back up every 5 minutes (a value from an existing config file is migrated in load()).
     if (get("backup_interval").empty()) {
-        set("backup_interval", "10");
+        set("backup_interval", "300");
     }
 
     if (get("curr_bed_type").empty()) {
@@ -966,6 +967,15 @@ std::string AppConfig::load()
                 set(SETTING_CLOUD_PROVIDERS, "orca");
             }
         }
+    }
+
+    // The old default of 10 s exported the whole project on the UI thread every 10 s whenever something changed,
+    // which freezes the interface on big projects. Move the old default to 5 minutes, once.
+    // (Done here, on the loaded data: the constructor already ran set_defaults() on an empty config.)
+    if (get("backup_interval_v2").empty()) {
+        if (get("backup_interval").empty() || get("backup_interval") == "10")
+            set("backup_interval", "300");
+        set("backup_interval_v2", "1");
     }
 
     // Override missing or keys with their defaults.
