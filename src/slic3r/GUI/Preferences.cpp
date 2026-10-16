@@ -1019,6 +1019,9 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
             if (m_sync_user_preset_checkbox) m_sync_user_preset_checkbox->Enable(!enabled);
             if (m_bambu_cloud_checkbox)      m_bambu_cloud_checkbox->Enable(!enabled);
         }
+        else if (param == "use_retina_opengl") {
+            wxGetApp().update_ui_from_settings();
+        }
         else if (param == "hide_login_side_panel") {
             if (wxGetApp().mainframe && wxGetApp().mainframe->m_webview) {
                 wxGetApp().mainframe->m_webview->SendCloudProvidersInfo();
@@ -1831,6 +1834,21 @@ void PreferencesDialog::create_items()
         SETTING_OPENGL_FXAA_ENABLED
     );
     g_sizer->Add(item_fxaa);
+
+#ifdef __APPLE__
+    //// GRAPHICS > Display
+    g_sizer->Add(create_item_title(_L("Display")), 1, wxEXPAND);
+
+    auto item_retina = create_item_checkbox(
+        _L("Retina resolution in the 3D view"),
+        _L("Renders the 3D view and the G-code preview at the display's full (Retina) resolution.\n"
+           "Turn it off to render about 4 times fewer pixels: smoother on large G-code previews and lighter on the GPU, "
+           "at the cost of a softer image.\n\n"
+           "Takes effect immediately."),
+        "use_retina_opengl"
+    );
+    g_sizer->Add(item_retina);
+#endif
 
     //// GRAPHICS > FPS
     g_sizer->Add(create_item_title(_L("FPS")), 1, wxEXPAND);

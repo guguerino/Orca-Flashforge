@@ -1,0 +1,1 @@
+mimalloc v3.5.3 (https://github.com/microsoft/mimalloc, tag v3.5.3, commit d4881d3), MIT license. Vendored unmodified (include/, src/, cmake/, CMakeLists.txt).

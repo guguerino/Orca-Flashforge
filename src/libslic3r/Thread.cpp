@@ -14,6 +14,12 @@
 #include <tbb/task_arena.h>
 
 #include "Thread.hpp"
+#ifdef __APPLE__
+#include <pthread.h>
+#include <pthread/qos.h>
+#include <cstdlib>
+#include "MacUtils.hpp"
+#endif
 #include "Utils.hpp"
 
 namespace Slic3r {
@@ -207,6 +213,31 @@ bool is_main_thread_active()
 	return get_main_thread_id() == boost::this_thread::get_id();
 }
 
+void set_current_thread_qos_user_initiated()
+{
+#ifdef __APPLE__
+	// Opt-in: measured on an M4 (4P+6E) it gave no speedup, neither on an idle machine nor under heavy
+	// competing load, so it is off by default.
+	static const bool enabled = std::getenv("FLASH_ENABLE_QOS") != nullptr;
+	if (enabled)
+		pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+}
+
+SlicingActivityGuard::SlicingActivityGuard()
+{
+#ifdef __APPLE__
+	mac_slicing_activity_begin();
+#endif
+}
+
+SlicingActivityGuard::~SlicingActivityGuard()
+{
+#ifdef __APPLE__
+	mac_slicing_activity_end();
+#endif
+}
+
 // Spawn (n - 1) worker threads on Intel TBB thread pool and name them by an index and a system thread ID.
 // Also it sets locale of the worker threads to "C" for the G-code generator to produce "." as a decimal separator.
 void name_tbb_thread_pool_threads_set_locale()
@@ -246,6 +277,8 @@ void name_tbb_thread_pool_threads_set_locale()
 			    cv.wait(lk, [&nthreads_running, nthreads]{return nthreads_running == nthreads;});
         	}
         	auto thread_id = std::this_thread::get_id();
+			// Keep every slicing thread on the fast cores (macOS QoS); harmless elsewhere.
+			set_current_thread_qos_user_initiated();
 			if (thread_id == master_thread_id) {
 				// The calling thread runs the 0'th task.
 				assert(range.begin() == 0);

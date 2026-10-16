@@ -158,6 +158,17 @@ if (NOT WIN32 AND NOT APPLE)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/unix/build_linux_image.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_linux_image.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif ()
 
+if (APPLE)
+    # Link mimalloc first so it registers its malloc zone before anything else allocates.
+    target_link_libraries(Orca-Flashforge mimalloc)
+    set_property(TARGET Orca-Flashforge APPEND PROPERTY BUILD_RPATH   "@executable_path")
+    set_property(TARGET Orca-Flashforge APPEND PROPERTY INSTALL_RPATH "@executable_path")
+    # Ship the dylib next to the executable inside the .app (Contents/MacOS).
+    add_custom_command(TARGET Orca-Flashforge POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_SONAME_FILE:mimalloc> "$<TARGET_FILE_DIR:Orca-Flashforge>/"
+        COMMENT "Copying libmimalloc next to the executable"
+        VERBATIM)
+endif ()
 target_link_libraries(Orca-Flashforge libslic3r cereal::cereal)
 # target_include_directories(Orca-Flashforge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/slic3r)
 if (APPLE)

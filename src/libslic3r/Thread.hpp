@@ -43,6 +43,23 @@ std::optional<std::string> get_current_thread_name();
 // Also it sets locale of the worker threads to "C" for the G-code generator to produce "." as a decimal separator.
 void name_tbb_thread_pool_threads_set_locale();
 
+// macOS: ask the scheduler to keep the calling thread on the performance cores
+// (QOS_CLASS_USER_INITIATED). No-op on other platforms and unless the environment variable
+// FLASH_ENABLE_QOS=1 is set: it showed no measurable gain, so it is opt-in.
+void set_current_thread_qos_user_initiated();
+
+// macOS: while alive, the process is not subject to App Nap / timer coalescing, so a slice that
+// runs while the window is in the background or hidden keeps its full speed. No-op elsewhere.
+// Set FLASH_DISABLE_APPNAP_GUARD=1 to turn it off.
+class SlicingActivityGuard
+{
+public:
+    SlicingActivityGuard();
+    ~SlicingActivityGuard();
+    SlicingActivityGuard(const SlicingActivityGuard&) = delete;
+    SlicingActivityGuard& operator=(const SlicingActivityGuard&) = delete;
+};
+
 template<class Fn>
 inline boost::thread create_thread(boost::thread::attributes &attrs, Fn &&fn)
 {

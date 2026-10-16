@@ -12,6 +12,21 @@ add_subdirectory(nanosvg)
 add_subdirectory(nlohmann)
 add_subdirectory(stb_dxt)     # Header-only STB DXT compression library
 
+# macOS: mimalloc replaces the system malloc for the whole process (malloc zone override).
+# Built as a shared library that the application links first; see src/CMakeLists.txt.
+# Set MIMALLOC_DISABLE_REDIRECT=1 in the environment to run without it (A/B measurements).
+if (APPLE)
+    set(MI_BUILD_SHARED  ON  CACHE BOOL "" FORCE)
+    set(MI_BUILD_STATIC  OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_OBJECT  OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+    set(MI_OVERRIDE      ON  CACHE BOOL "" FORCE)
+    set(MI_OSX_ZONE      ON  CACHE BOOL "" FORCE)
+    set(MI_OSX_INTERPOSE ON  CACHE BOOL "" FORCE)
+    set(MI_USE_CXX       OFF CACHE STRING "" FORCE)
+    add_subdirectory(mimalloc EXCLUDE_FROM_ALL)
+endif ()
+
 # Static libraries
 add_subdirectory(Shiny)
 add_subdirectory(admesh)

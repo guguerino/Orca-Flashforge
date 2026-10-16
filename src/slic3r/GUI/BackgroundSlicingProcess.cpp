@@ -310,6 +310,7 @@ void BackgroundSlicingProcess::thread_proc()
 {
 	//BBS: thread name
 	set_current_thread_name("bbl_BgSlcPcs");
+	set_current_thread_qos_user_initiated();
     name_tbb_thread_pool_threads_set_locale();
 
 	assert(m_print != nullptr);
@@ -334,11 +335,15 @@ void BackgroundSlicingProcess::thread_proc()
 		m_internal_cancelled = false;
 		lck.unlock();
 		std::exception_ptr exception;
+		{
+			// Keep macOS from throttling the process while it slices (App Nap).
+			SlicingActivityGuard slicing_activity;
 #ifdef _WIN32
-		this->call_process_seh_throw(exception);
+			this->call_process_seh_throw(exception);
 #else
-		this->call_process(exception);
+			this->call_process(exception);
 #endif
+		}
 		m_print->finalize();
 		lck.lock();
 		m_state = m_print->canceled() ? STATE_CANCELED : STATE_FINISHED;
