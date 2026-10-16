@@ -585,6 +585,9 @@ private:
     bool m_moving;
     bool m_tab_down;
     bool m_camera_movement;
+    // last wheel / gesture event, camera interactions that have no explicit "button released" event
+    std::chrono::steady_clock::time_point m_last_camera_interaction{};
+    bool m_lod_cooldown_pending{ false };
     //BBS: add toolpath outside
     bool m_toolpath_outside{ false };
     ECursorType m_cursor_type;

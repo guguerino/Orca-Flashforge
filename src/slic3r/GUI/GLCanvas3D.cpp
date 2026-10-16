@@ -2010,6 +2010,19 @@ void GLCanvas3D::render(bool only_init)
 
     camera.apply_projection(_max_bounding_box(true, true, true));
 
+    // Dense models are drawn in reduced detail while the camera is being moved.
+    {
+        using namespace std::chrono;
+        constexpr int lod_hold_ms = 250;
+        const bool recent_wheel = m_last_camera_interaction.time_since_epoch().count() != 0 &&
+            duration_cast<milliseconds>(steady_clock::now() - m_last_camera_interaction).count() < lod_hold_ms;
+        GLModel::set_interactive_lod(m_camera_movement || recent_wheel);
+        if (recent_wheel && !m_camera_movement && !m_lod_cooldown_pending) {
+            m_lod_cooldown_pending = true;
+            schedule_extra_frame(lod_hold_ms + 30);
+        }
+    }
+
     wxGetApp().imgui()->new_frame();
 
     if (m_picking_enabled) {
@@ -3953,6 +3966,8 @@ void GLCanvas3D::on_mouse_wheel(wxMouseEvent& evt)
     if (evt.MiddleIsDown())
         return;
 
+    m_last_camera_interaction = std::chrono::steady_clock::now();
+
 #if ENABLE_RETINA_GL
     const float scale = m_retina_helper->get_scale_factor();
     evt.SetX(evt.GetX() * scale);
@@ -4054,6 +4069,12 @@ void GLCanvas3D::on_render_timer(wxTimerEvent& evt)
     // right after this event, idle event is fired
     // m_dirty = true;
     // wxWakeUpIdle();
+    if (m_lod_cooldown_pending) {
+        // redraw the scene at full detail after a wheel / gesture camera interaction
+        m_lod_cooldown_pending = false;
+        m_dirty = true;
+        wxWakeUpIdle();
+    }
 }
 
 void GLCanvas3D::on_set_color_timer(wxTimerEvent& evt)
@@ -4151,6 +4172,7 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
     if (!m_initialized || !_set_current())
         return;
 
+    m_last_camera_interaction = std::chrono::steady_clock::now();
     auto & camera = wxGetApp().plater()->get_camera();
     if (evt.GetEventType() == wxEVT_GESTURE_PAN) {
         auto p = evt.GetPosition();

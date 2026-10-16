@@ -12,6 +12,11 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 
 #include <boost/filesystem/operations.hpp>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <deque>
+#include <cstring>
 #include <boost/algorithm/string/predicate.hpp>
 
 #if defined(L)
@@ -572,6 +577,11 @@ void GLModel::reset()
         glsafe(::glDeleteBuffers(1, &m_render_data.ibo_id));
         m_render_data.ibo_id = 0;
     }
+    if (m_lod_ibo_id > 0) {
+        glsafe(::glDeleteBuffers(1, &m_lod_ibo_id));
+        m_lod_ibo_id = 0;
+    }
+    m_lod_indices_count = 0;
     if (m_render_data.vbo_id > 0) {
         glsafe(::glDeleteBuffers(1, &m_render_data.vbo_id));
         m_render_data.vbo_id = 0;
@@ -594,6 +604,183 @@ void GLModel::reset()
     m_bounding_box = BoundingBoxf3();
     m_filename = std::string();
 }
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Interactive level of detail
+//
+// Very dense meshes (millions of triangles, typically many instances of a scanned / sculpted object) are limited by
+// the triangle throughput of the GPU, not by the resolution. While the camera is moving they are drawn from a much
+// smaller index buffer that reuses the vertex buffer already on the GPU: the vertices are clustered on a grid, every
+// vertex is replaced by the first vertex of its cell and the triangles that collapse are dropped.
+// ---------------------------------------------------------------------------------------------------------------------
+static std::atomic<bool> s_interactive_lod{ false };
+
+void GLModel::set_interactive_lod(bool active) { s_interactive_lod.store(active, std::memory_order_relaxed); }
+bool GLModel::is_interactive_lod() { return s_interactive_lod.load(std::memory_order_relaxed); }
+
+namespace {
+constexpr size_t LOD_MIN_TRIANGLES = 120000; // models with fewer triangles are always drawn in full
+
+using LodIndices = std::shared_ptr<const std::vector<unsigned int>>;
+
+uint64_t lod_hash_bytes(const void* data, size_t bytes, uint64_t h)
+{
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    size_t n = bytes / 8;
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t w;
+        std::memcpy(&w, p + i * 8, 8);
+        h ^= w;
+        h *= 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    for (size_t i = n * 8; i < bytes; ++i) {
+        h ^= p[i];
+        h *= 0x100000001B3ull;
+    }
+    return h;
+}
+
+// Results are shared between identical models (the instances of one object).
+struct LodCache
+{
+    std::mutex mutex;
+    std::unordered_map<uint64_t, LodIndices> map;
+    std::deque<uint64_t> order;
+
+    LodIndices find(uint64_t key) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = map.find(key);
+        return it == map.end() ? LodIndices() : it->second;
+    }
+    void insert(uint64_t key, LodIndices value) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (map.emplace(key, std::move(value)).second) {
+            order.push_back(key);
+            while (order.size() > 16) {
+                map.erase(order.front());
+                order.pop_front();
+            }
+        }
+    }
+};
+
+LodCache& lod_cache()
+{
+    static LodCache cache;
+    return cache;
+}
+
+// Returns an empty pointer when the model should not get a reduced version.
+LodIndices build_lod_indices(const GLModel::Geometry& g)
+{
+    using Geometry = GLModel::Geometry;
+    if (g.format.type != Geometry::EPrimitiveType::Triangles || !Geometry::has_position(g.format) || Geometry::position_stride_floats(g.format) != 3)
+        return {};
+
+    const size_t stride = Geometry::vertex_stride_floats(g.format);
+    const size_t poff   = Geometry::position_offset_floats(g.format);
+    const size_t nv     = g.vertices.size() / stride;
+    const size_t ntri   = g.indices.size() / 3;
+    if (ntri < LOD_MIN_TRIANGLES || nv == 0)
+        return {};
+
+    const float* v = g.vertices.data();
+    auto pos = [&](size_t i) { return Vec3f(v[i * stride + poff], v[i * stride + poff + 1], v[i * stride + poff + 2]); };
+
+    Vec3f mn(FLT_MAX, FLT_MAX, FLT_MAX), mx(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    for (size_t i = 0; i < nv; ++i) {
+        const Vec3f p = pos(i);
+        mn = mn.cwiseMin(p);
+        mx = mx.cwiseMax(p);
+    }
+    const float extent = (mx - mn).maxCoeff();
+    if (!(extent > 0.f))
+        return {};
+
+    // Surface area from a sample of the triangles, to size the grid.
+    double area = 0.;
+    size_t samples = 0;
+    for (size_t t = 0; t < ntri; t += 16, ++samples) {
+        const Vec3f a = pos(g.indices[t * 3]), b = pos(g.indices[t * 3 + 1]), c = pos(g.indices[t * 3 + 2]);
+        area += 0.5 * double((b - a).cross(c - a).norm());
+    }
+    area *= double(ntri) / double(samples);
+
+    const double target = std::min(250000., std::max(30000., double(ntri) / 12.));
+    const double min_cell = double(extent) / double(1 << 20);
+
+    auto cluster = [&](double cell, std::vector<unsigned int>& out) {
+        const double inv = 1.0 / cell;
+        std::vector<unsigned int> vmap(nv);
+        // open addressing hash table: cell key -> first vertex seen in the cell
+        size_t cap = size_t(1) << 18;
+        std::vector<uint64_t> keys(cap, ~uint64_t(0));
+        std::vector<unsigned int> vals(cap);
+        size_t used = 0;
+        auto grow = [&]() {
+            const size_t ncap = cap * 2;
+            std::vector<uint64_t> nkeys(ncap, ~uint64_t(0));
+            std::vector<unsigned int> nvals(ncap);
+            for (size_t i = 0; i < cap; ++i) {
+                if (keys[i] == ~uint64_t(0))
+                    continue;
+                size_t j = (keys[i] * 0x9E3779B97F4A7C15ull) >> 20 & (ncap - 1);
+                while (nkeys[j] != ~uint64_t(0))
+                    j = (j + 1) & (ncap - 1);
+                nkeys[j] = keys[i];
+                nvals[j] = vals[i];
+            }
+            keys.swap(nkeys);
+            vals.swap(nvals);
+            cap = ncap;
+        };
+        for (size_t i = 0; i < nv; ++i) {
+            const Vec3f p = pos(i) - mn;
+            const uint64_t key = (uint64_t(p.x() * inv) << 42) | (uint64_t(p.y() * inv) << 21) | uint64_t(p.z() * inv);
+            size_t j = (key * 0x9E3779B97F4A7C15ull) >> 20 & (cap - 1);
+            while (keys[j] != ~uint64_t(0) && keys[j] != key)
+                j = (j + 1) & (cap - 1);
+            unsigned int rep;
+            if (keys[j] == ~uint64_t(0)) {
+                // first vertex of the cell represents it
+                keys[j] = key;
+                vals[j] = rep = (unsigned int)i;
+                if (++used * 2 > cap)
+                    grow();
+            }
+            else
+                rep = vals[j];
+            vmap[i] = rep;
+        }
+        out.clear();
+        out.reserve(size_t(target) * 3 * 2);
+        for (size_t t = 0; t < ntri; ++t) {
+            const unsigned int a = vmap[g.indices[t * 3]], b = vmap[g.indices[t * 3 + 1]], c = vmap[g.indices[t * 3 + 2]];
+            if (a != b && b != c && a != c) {
+                out.push_back(a);
+                out.push_back(b);
+                out.push_back(c);
+            }
+        }
+    };
+
+    // about two triangles per occupied cell, ~1.3 cells of area per cell of surface
+    double cell = std::max(min_cell, std::sqrt(area * 1.3 * 2. / target));
+    auto out = std::make_shared<std::vector<unsigned int>>();
+    cluster(cell, *out);
+    const double got = double(out->size() / 3);
+    if (got > 2. * target || got < 0.4 * target) {
+        cell = std::max(min_cell, cell * std::sqrt(got / target));
+        cluster(cell, *out);
+    }
+    if (out->size() / 3 >= ntri / 2 || out->empty())
+        return {};
+    out->shrink_to_fit();
+    return out;
+}
+} // namespace
 
 static GLenum get_primitive_mode(const GLModel::Geometry::Format& format)
 {
@@ -694,8 +881,14 @@ void GLModel::render(const std::pair<size_t, size_t>& range, GLShaderProgram* sh
 
     shader->set_uniform("uniform_color", data.color);
 
-    glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_render_data.ibo_id));
-    glsafe(::glDrawElements(mode, range.second - range.first, index_type, (const void*)(range.first * Geometry::index_stride_bytes(data))));
+    if (m_lod_ibo_id != 0 && s_interactive_lod.load(std::memory_order_relaxed) && range.first == 0 && range.second == m_render_data.indices_count) {
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_lod_ibo_id));
+        glsafe(::glDrawElements(mode, m_lod_indices_count, index_type, (const void*)0));
+    }
+    else {
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_render_data.ibo_id));
+        glsafe(::glDrawElements(mode, range.second - range.first, index_type, (const void*)(range.first * Geometry::index_stride_bytes(data))));
+    }
     glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
 
     if (tex_coord_id != -1)
@@ -826,6 +1019,20 @@ bool GLModel::send_to_gpu()
     }
 #endif // !SLIC3R_OPENGL_ES
 
+    // reduced index buffer for camera interaction (needs the cpu copy of the vertices, released below)
+    LodIndices lod;
+    if (data.indices.size() / 3 >= LOD_MIN_TRIANGLES && data.vertices_count() > 256) {
+        uint64_t key = lod_hash_bytes(data.vertices.data(), data.vertices.size() * sizeof(float), 0xcbf29ce484222325ull);
+        key = lod_hash_bytes(data.indices.data(), data.indices.size() * sizeof(unsigned int), key);
+        key ^= uint64_t(data.format.vertex_layout) << 56;
+        lod = lod_cache().find(key);
+        if (!lod) {
+            lod = build_lod_indices(data);
+            if (lod)
+                lod_cache().insert(key, lod);
+        }
+    }
+
     // vertices
     glsafe(::glGenBuffers(1, &m_render_data.vbo_id));
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_render_data.vbo_id));
@@ -865,6 +1072,21 @@ bool GLModel::send_to_gpu()
     }
     m_render_data.indices_count = indices_count;
     data.indices = std::vector<unsigned int>();
+
+    if (lod && data.index_type != Geometry::EIndexType::UBYTE) {
+        glsafe(::glGenBuffers(1, &m_lod_ibo_id));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_lod_ibo_id));
+        if (data.index_type == Geometry::EIndexType::USHORT) {
+            std::vector<unsigned short> reduced(lod->size());
+            for (size_t i = 0; i < lod->size(); ++i)
+                reduced[i] = (unsigned short)(*lod)[i];
+            glsafe(::glBufferData(GL_ELEMENT_ARRAY_BUFFER, reduced.size() * sizeof(unsigned short), reduced.data(), GL_STATIC_DRAW));
+        }
+        else
+            glsafe(::glBufferData(GL_ELEMENT_ARRAY_BUFFER, lod->size() * sizeof(unsigned int), lod->data(), GL_STATIC_DRAW));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+        m_lod_indices_count = lod->size();
+    }
 
 #if !SLIC3R_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile()) {

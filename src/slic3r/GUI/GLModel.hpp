@@ -6,6 +6,7 @@
 #include "libslic3r/Color.hpp"
 #include <vector>
 #include <string>
+#include <atomic>
 
 struct indexed_triangle_set;
 
@@ -149,6 +150,10 @@ namespace GUI {
         // enable_render()
         // to keep the data on cpu side until needed.
         bool m_render_disabled{ false };
+
+        // Reduced index buffer (same vertex buffer) used while the camera is being moved, for very dense models.
+        unsigned int m_lod_ibo_id{ 0 };
+        size_t m_lod_indices_count{ 0 };
         BoundingBoxf3 m_bounding_box;
         std::string m_filename;
 
@@ -178,6 +183,12 @@ namespace GUI {
         const ColorRGBA& get_color() const { return m_render_data.geometry.color; }
 
         void reset();
+
+        // While active, dense models are drawn from a simplified index buffer (see GLModel::send_to_gpu()).
+        // Set by the canvas for the duration of a camera interaction (orbit / pan / zoom).
+        static void set_interactive_lod(bool active);
+        static bool is_interactive_lod();
+
         void render(GLShaderProgram* shader = nullptr);
         void render(const std::pair<size_t, size_t>& range, GLShaderProgram* shader = nullptr);
         void render_instanced(unsigned int instances_vbo, unsigned int instances_count);
