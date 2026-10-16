@@ -227,10 +227,16 @@ public:
 
     GUI::GLModel            model;
     // raycaster used for picking
-    std::unique_ptr<GUI::MeshRaycaster> mesh_raycaster;
+    // shared by the instances of one mesh: building the AABB tree of a dense mesh is costly in time and memory
+    std::shared_ptr<GUI::MeshRaycaster> mesh_raycaster;
     // BBS
-    mutable std::vector<GUI::GLModel> mmuseg_models;
+    // Painted (multi color) meshes, one GLModel per color. Shared by all the instances of the same ModelVolume.
+    using MmusegModels = std::vector<GUI::GLModel>;
+    mutable std::shared_ptr<MmusegModels> mmuseg_models;
     mutable ObjectBase::Timestamp       mmuseg_ts;
+
+    // Builds the complete geometry of `model` when it was created with GLModel::init_bounds_only().
+    void ensure_full_model();
 
     // Ranges of triangle and quad indices to be rendered.
     std::pair<size_t, size_t>   tverts_range;

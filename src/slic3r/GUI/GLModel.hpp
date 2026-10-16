@@ -175,6 +175,10 @@ namespace GUI {
 
         void init_from(Geometry&& data);
         void init_from(const TriangleMesh& mesh);
+        // Records the bounding box and the vertex / index counts of the mesh without keeping any geometry.
+        // Used for volumes that are always drawn from other (per color) models, see GLVolume::simple_render().
+        void init_bounds_only(const TriangleMesh& mesh);
+        bool is_bounds_only() const { return m_render_data.vbo_id == 0 && m_render_data.geometry.vertices.empty() && m_render_data.vertices_count > 0; }
         void init_from(const indexed_triangle_set& its);
         void init_from(const Polygons& polygons, float z);
         bool init_from_file(const std::string& filename);

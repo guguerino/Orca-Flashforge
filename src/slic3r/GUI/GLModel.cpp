@@ -443,6 +443,22 @@ void GLModel::init_from(const TriangleMesh& mesh)
     init_from(mesh.its);
 }
 
+void GLModel::init_bounds_only(const TriangleMesh& mesh)
+{
+    if (is_initialized())
+        return;
+    const indexed_triangle_set& its = mesh.its;
+    if (its.vertices.empty() || its.indices.empty())
+        return;
+
+    m_render_data.geometry.format = { Geometry::EPrimitiveType::Triangles, Geometry::EVertexLayout::P3N3 };
+    for (const Vec3f& v : its.vertices)
+        m_bounding_box.merge(v.cast<double>());
+    // same counts as init_from(): three vertices and three indices per triangle
+    m_render_data.vertices_count = 3 * its.indices.size();
+    m_render_data.indices_count  = 3 * its.indices.size();
+}
+
 void GLModel::init_from(const indexed_triangle_set& its)
 {
     if (is_initialized()) {
@@ -832,6 +848,9 @@ void GLModel::render(const std::pair<size_t, size_t>& range, GLShaderProgram* sh
         if (m_render_data.geometry.vertices_count() > 0 && m_render_data.geometry.indices_count() > 0 && !send_to_gpu())
             return;
     }
+
+    if (m_render_data.vbo_id == 0 || m_render_data.ibo_id == 0)
+        return; // nothing to draw (bounds only model)
 
     const Geometry& data = m_render_data.geometry;
 

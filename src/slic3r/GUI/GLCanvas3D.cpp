@@ -8091,6 +8091,7 @@ void GLCanvas3D::_render_cast_shadows_on_plate(const Transform3d& view_matrix, c
         shader->set_uniform("view_model_matrix", view_shadow_matrix);
         shader->set_uniform("projection_matrix", projection_matrix);
         
+        volume->ensure_full_model();
         volume->model.render(shader);
     }
     

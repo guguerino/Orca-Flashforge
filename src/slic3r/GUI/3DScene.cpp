@@ -23,6 +23,9 @@
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <map>
+#include <cstring>
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +85,54 @@ Slic3r::ColorRGBA adjust_color_for_rendering(const Slic3r::ColorRGBA &colors)
     else
         return colors;
 }
+
+namespace {
+// Fast 64 bit content hash, used to share data between identical meshes (e.g. the copies of an object that
+// 3MF files store once per plate item, which the loader turns into independent meshes).
+uint64_t content_hash(const void* data, size_t bytes, uint64_t h)
+{
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    const size_t n = bytes / 8;
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t w;
+        std::memcpy(&w, p + i * 8, 8);
+        h ^= w;
+        h *= 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    for (size_t i = n * 8; i < bytes; ++i) {
+        h ^= p[i];
+        h *= 0x100000001B3ull;
+    }
+    return h;
+}
+
+uint64_t mesh_content_hash(const Slic3r::TriangleMesh& mesh)
+{
+    uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t(mesh.its.vertices.size()) << 32) ^ uint64_t(mesh.its.indices.size());
+    h = content_hash(mesh.its.vertices.data(), mesh.its.vertices.size() * sizeof(mesh.its.vertices[0]), h);
+    return content_hash(mesh.its.indices.data(), mesh.its.indices.size() * sizeof(mesh.its.indices[0]), h);
+}
+
+uint64_t facets_content_hash(const Slic3r::TriangleSelector::TriangleSplittingData& d, uint64_t h)
+{
+    h = content_hash(d.triangles_to_split.data(), d.triangles_to_split.size() * sizeof(d.triangles_to_split[0]), h);
+    uint64_t word = 0;
+    int bits = 0;
+    for (bool b : d.bitstream) {
+        word = (word << 1) | uint64_t(b);
+        if (++bits == 64) {
+            h = content_hash(&word, 8, h);
+            word = 0;
+            bits = 0;
+        }
+    }
+    h = content_hash(&word, 8, h ^ uint64_t(d.bitstream.size()));
+    for (bool b : d.used_states)
+        h = h * 31 + uint64_t(b);
+    return h;
+}
+} // namespace
 
 namespace Slic3r {
 
@@ -476,11 +527,27 @@ void GLVolume::render()
     simple_render(shader, model_objects, colors);
 }
 
+void GLVolume::ensure_full_model()
+{
+    if (!model.is_bounds_only())
+        return;
+    const ModelObjectPtrs& objects = GUI::wxGetApp().model().objects;
+    if (object_idx() < 0 || size_t(object_idx()) >= objects.size())
+        return;
+    const ModelObject* object = objects[object_idx()];
+    if (volume_idx() < 0 || size_t(volume_idx()) >= object->volumes.size())
+        return;
+    const std::shared_ptr<const TriangleMesh> mesh = object->volumes[volume_idx()]->mesh_ptr();
+    model.reset();
+    model.init_from(*mesh);
+}
+
 //BBS: add outline related logic
 void GLVolume::render_with_outline(const GUI::Size& cnv_size)
 {
     if (!is_active)
         return;
+    ensure_full_model();
 
     GLShaderProgram *shader = GUI::wxGetApp().get_current_shader();
     if (shader == nullptr)
@@ -586,32 +653,46 @@ void GLVolume::simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_obj
             break;
 
         color_volume = true;
-        if (model_volume->mmu_segmentation_facets.timestamp() != mmuseg_ts) {
-            mmuseg_models.clear();
-            std::vector<indexed_triangle_set> its_per_color;
-            model_volume->mmu_segmentation_facets.get_facets(*model_volume, its_per_color);
-            mmuseg_models.resize(its_per_color.size());
-            for (int idx = 0; idx < its_per_color.size(); idx++) {
-                mmuseg_models[idx].init_from(its_per_color[idx]);
+        if (!mmuseg_models || model_volume->mmu_segmentation_facets.timestamp() != mmuseg_ts) {
+            // The instances of an object share one ModelVolume: split the facets by color and upload them only once.
+            // identical meshes with identical painting share one set of models
+            static std::map<uint64_t, std::weak_ptr<MmusegModels>> s_shared;
+            const uint64_t key = facets_content_hash(model_volume->mmu_segmentation_facets.get_data(), mesh_content_hash(model_volume->mesh()));
+            for (auto it = s_shared.begin(); it != s_shared.end();)
+                it = it->second.expired() ? s_shared.erase(it) : std::next(it);
+            std::shared_ptr<MmusegModels> shared;
+            if (auto it = s_shared.find(key); it != s_shared.end())
+                shared = it->second.lock();
+            if (!shared) {
+                std::vector<indexed_triangle_set> its_per_color;
+                model_volume->mmu_segmentation_facets.get_facets(*model_volume, its_per_color);
+                shared = std::make_shared<MmusegModels>(its_per_color.size());
+                for (int idx = 0; idx < its_per_color.size(); idx++)
+                    (*shared)[idx].init_from(its_per_color[idx]);
+                s_shared[key] = shared;
             }
-
+            mmuseg_models = shared;
             mmuseg_ts = model_volume->mmu_segmentation_facets.timestamp();
         }
     } while (0);
 
-    if (color_volume && !picking) {
+    if (color_volume) {
         // when force_transparent, we need to keep the alpha
         if (force_native_color && render_color.is_transparent()) {
             for (auto &extruder_color : extruder_colors)
                 extruder_color.a(render_color.a());
         }
 
-        for (int idx = 0; idx < mmuseg_models.size(); idx++) {
-            GUI::GLModel &m = mmuseg_models[idx];
+        for (int idx = 0; idx < mmuseg_models->size(); idx++) {
+            GUI::GLModel &m = (*mmuseg_models)[idx];
             if (!m.is_initialized())
                 continue;
 
-            if (shader) {
+            if (picking) {
+                // color encoding the volume id, set on `model` by the picking pass
+                m.set_color(model.get_color());
+            }
+            else if (shader) {
                 if (idx == 0) {
                     int extruder_id = model_volume->extruder_id();
                     // Clamp to valid range; fall back to extruder 1 on overflow
@@ -652,6 +733,7 @@ void GLVolume::simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_obj
                 m.render(this->tverts_range, shader);
         }
     } else {
+        ensure_full_model();
         if (tverts_range == std::make_pair<size_t, size_t>(0, -1))
             model.render(shader);
         else
@@ -762,8 +844,27 @@ int GLVolumeCollection::load_object_volume(
     v.set_color(color_from_model_volume(*model_volume));
     v.name = model_volume->name;
 
-    v.model.init_from(*mesh);
-    if (need_raycaster) { v.mesh_raycaster = std::make_unique<GUI::MeshRaycaster>(mesh); }
+    // Painted volumes are drawn from their per color models (shared by the instances, see GLVolume::simple_render()),
+    // so the complete geometry (about 170 MB for a 2M triangles mesh, per instance) is not kept.
+    if (model_volume->is_model_part() && !model_volume->mmu_segmentation_facets.empty())
+        v.model.init_bounds_only(*mesh);
+    else
+        v.model.init_from(*mesh);
+    if (need_raycaster) {
+        // one raycaster per distinct mesh content, shared by all the instances / identical objects
+        static std::map<uint64_t, std::weak_ptr<GUI::MeshRaycaster>> s_raycasters;
+        for (auto it = s_raycasters.begin(); it != s_raycasters.end();)
+            it = it->second.expired() ? s_raycasters.erase(it) : std::next(it);
+        const uint64_t mesh_key = mesh_content_hash(*mesh);
+        std::shared_ptr<GUI::MeshRaycaster> raycaster;
+        if (auto it = s_raycasters.find(mesh_key); it != s_raycasters.end())
+            raycaster = it->second.lock();
+        if (!raycaster) {
+            raycaster = std::make_shared<GUI::MeshRaycaster>(mesh);
+            s_raycasters[mesh_key] = raycaster;
+        }
+        v.mesh_raycaster = std::move(raycaster);
+    }
     v.composite_id = GLVolume::CompositeID(obj_idx, volume_idx, instance_idx);
 
     if (model_volume->is_model_part())
