@@ -23,6 +23,27 @@ namespace GUI {
 NSTextField* mainframe_text_field = nil;
 bool is_in_full_screen_mode = false;
 
+static NSTextField* find_text_field(NSView *view)
+{
+    if (view == nil)
+        return nil;
+    if ([view isKindOfClass:[NSTextField class]])
+        return (NSTextField *) view;
+    for (NSView *subview in [view subviews]) {
+        if (NSTextField *field = find_text_field(subview))
+            return field;
+    }
+    return nil;
+}
+
+static NSColor* ns_color_from_wx(const wxColour& color)
+{
+    return [NSColor colorWithCalibratedRed:color.Red() / 255.0
+                                     green:color.Green() / 255.0
+                                      blue:color.Blue() / 255.0
+                                     alpha:color.Alpha() / 255.0];
+}
+
 bool mac_dark_mode()
 {
     NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleInterfaceStyle"];
@@ -40,6 +61,20 @@ double mac_max_scaling_factor()
 	    	scaling = std::max<double>(scaling, [[[NSScreen screens] objectAtIndex:0] backingScaleFactor]);
 	}
     return scaling;
+}
+
+void set_textfield_native_colours(void * window, const wxColour& background, const wxColour& foreground, bool draws_background)
+{
+    NSTextField *field = find_text_field((NSView *) window);
+    if (field == nil)
+        return;
+
+    if (@available(macOS 10.14, *))
+        field.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+
+    field.drawsBackground = draws_background ? YES : NO;
+    field.backgroundColor = ns_color_from_wx(background);
+    field.textColor = ns_color_from_wx(foreground);
 }
     
 void set_miniaturizable(void * window)
@@ -424,4 +459,13 @@ void initGestures(void * view,  wxEvtHandler * handler)
 }
 
 }
+}
+
+void StaticGroup_layoutBadge(void * group, void * badge)
+{
+    NSView * vg = (NSView *)group;
+    NSView * vb = (NSView *)badge;
+    vb.translatesAutoresizingMaskIntoConstraints = NO;
+    [vg addConstraint: [NSLayoutConstraint constraintWithItem:vb attribute:NSLayoutAttributeTop relatedBy:NSLayoutRelationEqual toItem:vg attribute:NSLayoutAttributeTop multiplier:1.0 constant:15]];
+    [vg addConstraint: [NSLayoutConstraint constraintWithItem:vb attribute:NSLayoutAttributeRight relatedBy:NSLayoutRelationEqual toItem:vg attribute:NSLayoutAttributeRight multiplier:1.0 constant:-1]];
 }

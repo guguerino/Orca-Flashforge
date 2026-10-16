@@ -15,6 +15,28 @@
 namespace Slic3r {
 namespace GUI {
 
+static wxImage get_default_user_image()
+{
+    wxImage image;
+    image.LoadFile(Slic3r::GUI::from_u8(Slic3r::var("login_default_usr_pic.png")), wxBITMAP_TYPE_PNG);
+    return image;
+}
+
+static void update_user_panel_image(RoundImage *panel)
+{
+    if (!panel) {
+        return;
+    }
+    if (wxGetApp().getUsrPic().IsOk()) {
+        panel->SetImage(wxGetApp().getUsrPic());
+    } else {
+        wxImage image = get_default_user_image();
+        if (image.IsOk()) {
+            panel->SetImage(image);
+        }
+    }
+}
+
 RoundImage::RoundImage(wxWindow *parent, const wxSize &size /*=wxDefaultSize*/)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, size)
 {
@@ -106,9 +128,7 @@ ReLoginDialog::ReLoginDialog() : TitleDialog(static_cast<wxWindow *>(wxGetApp().
 
 //**添加用户
     m_user_panel = new RoundImage(this, wxSize(FromDIP(80), FromDIP(80)));
-    if (wxGetApp().getUsrPic().IsOk()) {
-        m_user_panel->SetImage(wxGetApp().getUsrPic());
-    }
+    update_user_panel_image(m_user_panel);
     wxGetApp().Bind(EVT_USER_HEAD_IMAGE_UPDATED, &ReLoginDialog::onUserImageUpdated, this);
 
     m_sizer_main->Add(m_user_panel, 0, wxALIGN_CENTER, 0);
@@ -199,6 +219,7 @@ ReLoginDialog::ReLoginDialog() : TitleDialog(static_cast<wxWindow *>(wxGetApp().
 
 ReLoginDialog::~ReLoginDialog()
 {
+    wxGetApp().Unbind(EVT_USER_HEAD_IMAGE_UPDATED, &ReLoginDialog::onUserImageUpdated, this);
 }
 #if defined(__WIN32__) || defined(__LINUX__)
 void ReLoginDialog::onLoginoutBtnClicked(wxCommandEvent& event)
@@ -211,10 +232,6 @@ void ReLoginDialog::onLoginoutBtnClicked(wxCommandEvent& event)
     wxGetApp().handle_login_out();
     AppConfig *app_config = wxGetApp().app_config;
     if(app_config){
-        ComErrno login_out_result = MultiComHelper::inst()->singOut(ComTimeoutWanA);
-        if (login_out_result != ComErrno::COM_OK) {
-            BOOST_LOG_TRIVIAL(warning) << boost::format("MultiComHelper::inst()->singOut Failed!");
-        }
         app_config->set("access_token","");
         app_config->set("refresh_token","");
         app_config->set("token_expire_time", "");
@@ -223,6 +240,7 @@ void ReLoginDialog::onLoginoutBtnClicked(wxCommandEvent& event)
         app_config->set("show_user_points", "");
         app_config->set("usr_name","");
         app_config->set("usr_pic","");
+        app_config->set("usr_uid", "");
         Slic3r::GUI::MultiComMgr::inst()->removeWanDev();
     }
     event.Skip();
@@ -240,10 +258,6 @@ void ReLoginDialog::onLoginoutBtnClicked(wxMouseEvent &event)
     wxGetApp().handle_login_out();
     AppConfig *app_config = wxGetApp().app_config;
     if (app_config) {
-        ComErrno login_out_result = MultiComHelper::inst()->singOut(ComTimeoutWanA);
-        if (login_out_result != ComErrno::COM_OK) {
-            BOOST_LOG_TRIVIAL(warning) << boost::format("MultiComHelper::inst()->singOut Failed!");
-        }
         app_config->set("access_token", "");
         app_config->set("refresh_token", "");
         app_config->set("token_expire_time", "");
@@ -252,6 +266,7 @@ void ReLoginDialog::onLoginoutBtnClicked(wxMouseEvent &event)
         app_config->set("show_user_points", "");
         app_config->set("usr_name", "");
         app_config->set("usr_pic", "");
+        app_config->set("usr_uid", "");
         Slic3r::GUI::MultiComMgr::inst()->removeWanDev();
     }
     event.Skip();
@@ -297,9 +312,7 @@ void ReLoginDialog::onRelogin2BtnClicked(wxMouseEvent& event)
 
 void ReLoginDialog::onUserImageUpdated(wxCommandEvent& event)
 {
-    if (wxGetApp().getUsrPic().IsOk()) {
-        m_user_panel->SetImage(wxGetApp().getUsrPic());
-    }
+    update_user_panel_image(m_user_panel);
 }
 
 void ReLoginDialog::on_dpi_changed(const wxRect &suggested_rect)

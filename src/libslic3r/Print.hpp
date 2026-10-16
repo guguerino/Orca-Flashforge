@@ -1,9 +1,10 @@
 #ifndef slic3r_Print_hpp_
 #define slic3r_Print_hpp_
 
+#include "PrintBase.hpp"
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
-#include "PrintBase.hpp"
+#include "MixedFilament.hpp"
 
 #include "BoundingBox.hpp"
 #include "ExtrusionEntityCollection.hpp"
@@ -37,6 +38,7 @@ class SupportLayer;
 // BBS
 class TreeSupportData;
 class TreeSupport;
+class ExtrusionLayers;
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
 // BBS: move from PrintObjectSlice.cpp
@@ -51,6 +53,35 @@ struct groupedVolumeSlices
     int                     groupId = -1;
     std::vector<ObjectID>   volume_ids;
     ExPolygons              slices;
+};
+
+// Phase A local-Z dithering planner cache.
+struct LocalZInterval
+{
+    size_t layer_id { 0 };
+    double z_lo { 0.0 };
+    double z_hi { 0.0 };
+    double base_height { 0.0 };
+    double sublayer_height { 0.0 };
+    bool   has_mixed_paint { false };
+    size_t first_sublayer_idx { 0 };
+    size_t sublayer_count { 0 };
+};
+
+struct SubLayerPlan
+{
+    size_t layer_id { 0 };
+    size_t pass_index { 0 };
+    bool   split_interval { false };
+    double z_lo { 0.0 };
+    double z_hi { 0.0 };
+    double print_z { 0.0 };
+    double flow_height { 0.0 };
+    size_t dependency_group { 0 };
+    size_t dependency_order { 0 };
+    std::vector<ExPolygons> painted_masks_by_extruder;
+    std::vector<ExPolygons> fixed_painted_masks_by_extruder;
+    ExPolygons              base_masks;
 };
 
 enum SupportNecessaryType {
@@ -91,7 +122,7 @@ enum PrintStep {
 
 enum PrintObjectStep {
     posSlice, posPerimeters,posEstimateCurledExtrusions, posPrepareInfill,
-    posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifySupportPath,
+    posInfill, posIroning, posContouring, posSupportMaterial, posSimplifyPath, posSimplifySupportPath,
     // BBS
     posDetectOverhangsForLift,
     posSimplifyWall, posSimplifyInfill,
@@ -185,8 +216,6 @@ class ConstSupportLayerPtrsAdaptor : public ConstVectorOfPtrsAdaptor<SupportLaye
     ConstSupportLayerPtrsAdaptor(const SupportLayerPtrs *data) : ConstVectorOfPtrsAdaptor<SupportLayer>(data) {}
 };
 
-class BoundingBoxf3;        // TODO: for temporary constructor parameter
-
 // Single instance of a PrintObject.
 // As multiple PrintObjects may be generated for a single ModelObject (their instances differ in rotation around Z),
 // ModelObject's instancess will be distributed among these multiple PrintObjects.
@@ -199,7 +228,7 @@ struct PrintInstance
 	// Shift of this instance's center into the world coordinates.
 	Point 				 shift;
     
-    BoundingBoxf3   get_bounding_box();
+    BoundingBoxf3   get_bounding_box() const;
     Polygon get_convex_hull_2d();
     // SoftFever
     // 
@@ -251,6 +280,22 @@ public:
         PrintRegion     *region { nullptr };
     };
 
+    struct LayerRangeRegions;
+
+    struct FuzzySkinPaintedRegion
+    {
+        enum class ParentType { VolumeRegion, PaintedRegion };
+
+        ParentType   parent_type { ParentType::VolumeRegion };
+        // Index of a parent VolumeRegion or PaintedRegion.
+        int          parent { -1 };
+        // Pointer to PrintObjectRegions::all_regions.
+        PrintRegion *region { nullptr };
+
+        PrintRegion *parent_print_object_region(const LayerRangeRegions &layer_range) const;
+        int          parent_print_object_region_id(const LayerRangeRegions &layer_range) const;
+    };
+
     // One slice over the PrintObject (possibly the whole PrintObject) and a list of ModelVolumes and their bounding boxes
     // possibly clipped by the layer_height_range.
     struct LayerRangeRegions
@@ -263,8 +308,9 @@ public:
         std::vector<VolumeExtents>  volumes;
 
         // Sorted in the order of their source ModelVolumes, thus reflecting the order of region clipping, modifier overrides etc.
-        std::vector<VolumeRegion>   volume_regions;
-        std::vector<PaintedRegion>  painted_regions;
+        std::vector<VolumeRegion>           volume_regions;
+        std::vector<PaintedRegion>          painted_regions;
+        std::vector<FuzzySkinPaintedRegion> fuzzy_skin_painted_regions;
 
         bool has_volume(const ObjectID id) const {
             auto it = lower_bound_by_predicate(this->volumes.begin(), this->volumes.end(), [id](const VolumeExtents &l) { return l.volume_id < id; });
@@ -384,6 +430,19 @@ public:
     std::shared_ptr<TreeSupportData> alloc_tree_support_preview_cache();
     void clear_tree_support_preview_cache() { m_tree_support_preview_cache.reset(); }
 
+    const std::vector<LocalZInterval>& local_z_intervals() const { return m_local_z_intervals; }
+    const std::vector<SubLayerPlan>&   local_z_sublayer_plan() const { return m_local_z_sublayer_plan; }
+    void set_local_z_plan(std::vector<LocalZInterval> intervals, std::vector<SubLayerPlan> sublayers)
+    {
+        m_local_z_intervals     = std::move(intervals);
+        m_local_z_sublayer_plan = std::move(sublayers);
+    }
+    void clear_local_z_plan()
+    {
+        m_local_z_intervals.clear();
+        m_local_z_sublayer_plan.clear();
+    }
+
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
     SupportLayer*   get_support_layer(int idx) { return idx<m_support_layers.size()? m_support_layers[idx]:nullptr; }
@@ -394,7 +453,10 @@ public:
 
     // Initialize the layer_height_profile from the model_object's layer_height_profile, from model_object's layer height table, or from slicing parameters.
     // Returns true, if the layer_height_profile was changed.
-    static bool     update_layer_height_profile(const ModelObject &model_object, const SlicingParameters &slicing_parameters, std::vector<coordf_t> &layer_height_profile);
+    static bool     update_layer_height_profile(const ModelObject &model_object,
+                                                const SlicingParameters &slicing_parameters,
+                                                std::vector<coordf_t> &layer_height_profile,
+                                                const PrintObject *print_object = nullptr);
 
     // Collect the slicing parameters, to be used by variable layer thickness algorithm,
     // by the interactive layer height editor and by the printing process itself.
@@ -415,6 +477,8 @@ public:
     bool                        has_support_material()  const { return this->has_support() || this->has_raft(); }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool                        is_mm_painted()         const { return this->model_object()->is_mm_painted(); }
+    // Checks if the model object is painted using the fuzzy skin painting gizmo.
+    bool                        is_fuzzy_skin_painted() const { return this->model_object()->is_fuzzy_skin_painted(); }
 
     // returns 0-based indices of extruders used to print the object (without brim, support and other helper extrusions)
     std::vector<unsigned int>   object_extruders() const;
@@ -433,7 +497,7 @@ public:
     //BBS
     BoundingBox get_first_layer_bbox(float& area, float& layer_height, std::string& name);
     void         get_certain_layers(float start, float end, std::vector<LayerPtrs> &out, std::vector<BoundingBox> &boundingbox_objects);
-    std::vector<Point> get_instances_shift_without_plate_offset();
+    Points       get_instances_shift_without_plate_offset() const;
     PrintObject* get_shared_object() const { return m_shared_object; }
     void         set_shared_object(PrintObject *object);
     void         clear_shared_object();
@@ -478,9 +542,22 @@ private:
     void prepare_infill();
     void infill();
     void ironing();
+    bool need_z_contouring() const;
+    void contour_z();
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
+
+    /**
+     * @brief Determines the unprintable filaments for each extruder based on its printable area.
+     *
+     * The returned array will always have the same size as the number of extruders.
+     * If extruder num is 1, just return an empty vector.
+     * If an extruder has no unprintable filaments, an empty set will also be returned
+     *
+     * @return A vector of sets representing unprintable filaments for each extruder
+     */
+    std::vector<std::set<int>> detect_extruder_geometric_unprintables() const;
 
     void slice_volumes();
     //BBS
@@ -526,6 +603,8 @@ private:
     SlicingParameters                       m_slicing_params;
     LayerPtrs                               m_layers;
     SupportLayerPtrs                        m_support_layers;
+    std::vector<LocalZInterval>             m_local_z_intervals;
+    std::vector<SubLayerPlan>               m_local_z_sublayer_plan;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 
@@ -565,13 +644,15 @@ struct FakeWipeTower
     Vec2f pos;
     float width;
     float height;
-    float layer_height;
+    float layer_height;// Due to variable layer height, this parameter may be not right.
     float depth;
     std::vector<std::pair<float, float>> z_and_depth_pairs;
     float brim_width;
     float rotation_angle;
     float cone_angle;
     Vec2d plate_origin;
+    Vec2f rib_offset{0.f,0.f};
+    std::map<float , Polylines> outer_wall; //wipe tower's true outer wall and brim
 
     void set_fake_extrusion_data(Vec2f p, float w, float h, float lh, float d, float bd, Vec2d o)
     {
@@ -596,7 +677,8 @@ struct FakeWipeTower
         cone_angle = ca;
         plate_origin = o;
     }
-    void set_pos(Vec2f p) { pos = p; }
+
+    void set_pos(Vec2f p) { pos = p+rib_offset; }
     void set_pos_and_rotation(const Vec2f& p, float rotation) { pos = p; rotation_angle = rotation; }
 
     std::vector<ExtrusionPaths> getFakeExtrusionPathsFromWipeTower() const
@@ -610,19 +692,21 @@ struct FakeWipeTower
         std::vector<ExtrusionPaths> paths;
         for (float h = 0.f; h < height; h += layer_height) {
             ExtrusionPath path(ExtrusionRole::erWipeTower, 0.0, 0.0, layer_height);
-            path.polyline = {minCorner, {maxCorner.x(), minCorner.y()}, maxCorner, {minCorner.x(), maxCorner.y()}, minCorner};
+            path.polyline = Polyline3(Polyline{{minCorner, {maxCorner.x(), minCorner.y()}, maxCorner, {minCorner.x(), maxCorner.y()}, minCorner}});
             paths.push_back({path});
 
             if (h == 0.f) { // add brim
                 ExtrusionPath fakeBrim(ExtrusionRole::erBrim, 0.0, 0.0, layer_height);
                 Point         wtbminCorner = {minCorner - Point{bd, bd}};
                 Point         wtbmaxCorner = {maxCorner + Point{bd, bd}};
-                fakeBrim.polyline          = {wtbminCorner, {wtbmaxCorner.x(), wtbminCorner.y()}, wtbmaxCorner, {wtbminCorner.x(), wtbmaxCorner.y()}, wtbminCorner};
+                fakeBrim.polyline          = Polyline3(Polyline{{wtbminCorner, {wtbmaxCorner.x(), wtbminCorner.y()}, wtbmaxCorner, {wtbminCorner.x(), wtbmaxCorner.y()}, wtbminCorner}});
                 paths.back().push_back(fakeBrim);
             }
         }
         return paths;
     }
+
+    ExtrusionLayers getTrueExtrusionLayersFromWipeTower() const;
 
     std::vector<ExtrusionPaths> getFakeExtrusionPathsFromWipeTower2() const
     {
@@ -652,13 +736,13 @@ struct FakeWipeTower
 
 
             ExtrusionPath path(ExtrusionRole::erWipeTower, 0.0, 0.0, lh);
-            path.polyline = { minCorner, {maxCorner.x(), minCorner.y()}, maxCorner, {minCorner.x(), maxCorner.y()}, minCorner };
+            path.polyline = Polyline3(Polyline{{ minCorner, {maxCorner.x(), minCorner.y()}, maxCorner, {minCorner.x(), maxCorner.y()}, minCorner }});
             paths.push_back({ path });
 
             // We added the border, now add several parallel lines so we can detect an object that is fully inside the tower.
             // For now, simply use fixed spacing of 3mm.
             for (coord_t y=minCorner.y()+scale_(3.); y<maxCorner.y(); y+=scale_(3.)) {
-                path.polyline = { {minCorner.x(), y}, {maxCorner.x(), y} };
+                path.polyline = Polyline3(Polyline{{ {minCorner.x(), y}, {maxCorner.x(), y} }});
                 paths.back().emplace_back(path);
             }
 
@@ -703,6 +787,12 @@ struct FakeWipeTower
 
 struct WipeTowerData
 {
+    struct WipeTowerMeshData
+    {
+        Polygon      bottom;
+        TriangleMesh real_wipe_tower_mesh;
+        TriangleMesh real_brim_mesh;
+    };
     // Following section will be consumed by the GCodeGenerator.
     // Tool ordering of a non-sequential print has to be known to calculate the wipe tower.
     // Cache it here, so it does not need to be recalculated during the G-code generation.
@@ -710,6 +800,7 @@ struct WipeTowerData
     // Cache of tool changes per print layer.
     std::unique_ptr<std::vector<WipeTower::ToolChangeResult>> priming;
     std::vector<std::vector<WipeTower::ToolChangeResult>> tool_changes;
+    std::vector<std::vector<WipeTower::ToolChangeResult>> local_z_tool_changes;
     std::unique_ptr<WipeTower::ToolChangeResult>          final_purge;
     std::vector<float>                                    used_filament;
     int                                                   number_of_toolchanges;
@@ -719,16 +810,26 @@ struct WipeTowerData
     std::vector<std::pair<float, float>>                  z_and_depth_pairs;
     float                                                 brim_width;
     float                                                 height;
-
+    BoundingBoxf                                          bbx;//including brim
+    Vec2f                                                 rib_offset;
+    std::optional<WipeTowerMeshData>                      wipe_tower_mesh_data;//added rib_offset
+    // Per-layer boxes reserved for Local-Z unplanned toolchanges.
+    std::vector<std::vector<WipeTower::box_coordinates>>  local_z_reserve_boxes;
     void clear() {
         priming.reset(nullptr);
         tool_changes.clear();
+        local_z_tool_changes.clear();
         final_purge.reset(nullptr);
         used_filament.clear();
         number_of_toolchanges = -1;
         depth = 0.f;
         brim_width = 0.f;
+        height = 0.f;
+        rib_offset = Vec2f::Zero();
+        wipe_tower_mesh_data  = std::nullopt;
+        local_z_reserve_boxes.clear();
     }
+    void construct_mesh(float width, float depth, float height, float brim_width, bool is_rib_wipe_tower, float rib_width, float rib_length, bool fillet_wall);
 
 private:
 	// Only allow the WipeTowerData to be instantiated internally by Print, 
@@ -807,12 +908,34 @@ class ConstPrintRegionPtrsAdaptor : public ConstVectorOfPtrsAdaptor<PrintRegion>
 };
 */
 
+struct StatisticsByExtruderCount
+{
+    // flush weight comes first,then comes filament change time
+    FilamentChangeStats stats_by_single_extruder;
+    FilamentChangeStats stats_by_multi_extruder_best;
+    FilamentChangeStats stats_by_multi_extruder_curr;
+    void clear() {
+        stats_by_single_extruder.clear();
+        stats_by_multi_extruder_best.clear();
+        stats_by_multi_extruder_curr.clear();
+    }
+};
+
 enum FilamentTempType {
     HighTemp=0,
     LowTemp,
     HighLowCompatible,
     Undefine
 };
+
+enum FilamentCompatibilityType {
+    Compatible,
+    HighLowMixed,
+    //HighLowMixed,
+    //HighMidMixed,
+    InvalidTemperatureRange
+};
+
 // The complete print tray with possibly multiple objects.
 class Print : public PrintBaseWithState<PrintStep, psCount>
 {
@@ -837,7 +960,7 @@ public:
     // List of existing PrintObject IDs, to remove notifications for non-existent IDs.
     std::vector<ObjectID> print_object_ids() const override;
 
-    ApplyStatus         apply(const Model &model, DynamicPrintConfig config) override;
+    ApplyStatus         apply(const Model &model, DynamicPrintConfig config, bool extruder_applied = false) override;
 
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
@@ -877,6 +1000,8 @@ public:
     void                auto_assign_extruders(ModelObject* model_object) const;
 
     const PrintConfig&          config() const { return m_config; }
+    const MixedFilamentManager& mixed_filament_manager() const { return m_mixed_filament_mgr; }
+    MixedFilamentManager&       mixed_filament_manager()       { return m_mixed_filament_mgr; }
     const PrintObjectConfig&    default_object_config() const { return m_default_object_config; }
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
@@ -900,8 +1025,22 @@ public:
     // For Perl bindings.
     PrintObjectPtrs&            objects_mutable() { return m_objects; }
     PrintRegionPtrs&            print_regions_mutable() { return m_print_regions; }
-    std::vector<size_t>         layers_sorted_for_object(float start, float end, std::vector<LayerPtrs> &layers_of_objects, std::vector<BoundingBox> &boundingBox_for_objects, std::vector<Points>& objects_instances_shift);
+    std::vector<size_t>         layers_sorted_for_object(float start, float end, std::vector<LayerPtrs> &layers_of_objects, std::vector<BoundingBox> &boundingBox_for_objects, VecOfPoints& objects_instances_shift);
+    struct SkirtBrimGroup {
+        struct Brim {
+            ExtrusionEntityCollection brim;
+            std::vector<ObjectID>     object_ids;
+        };
+
+        ExtrusionEntityCollection skirt;
+        std::vector<ObjectID>     object_ids;
+        // Brims stay separate unless Combine brims merges colliding brims inside this group.
+        std::vector<Brim>         brims;
+    };
+
     const ExtrusionEntityCollection& skirt() const { return m_skirt; }
+    const std::vector<SkirtBrimGroup>& skirt_brim_groups() const { return m_skirt_brim_groups; }
+    bool has_shared_per_object_skirt() const { return m_has_shared_per_object_skirt; }
     // Convex hull of the 1st layer extrusions, for bed leveling and placing the initial purge line.
     // It encompasses the object extrusions, support extrusions, skirt, brim, wipe tower.
     // It does NOT encompass user extrusions generated by custom G-code,
@@ -912,10 +1051,56 @@ public:
     const PrintStatistics&      print_statistics() const { return m_print_statistics; }
     PrintStatistics&            print_statistics() { return m_print_statistics; }
 
+    const StatisticsByExtruderCount statistics_by_extruder() const { return m_statistics_by_extruder_count; }
+    StatisticsByExtruderCount& statistics_by_extruder() { return m_statistics_by_extruder_count; }
+
     // Wipe tower support.
     bool                        has_wipe_tower() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
+    // A generated clamp correction is authoritative only while the project
+    // still contains the input position that was clamped.
+    static Vec2d                resolve_wipe_tower_position(const Vec2d &project_position, bool position_clamped,
+                                                           const Vec2d &clamp_original, const Vec2d &clamp_corrected);
+    Vec2d                       resolve_wipe_tower_position(const Vec2d &project_position) const;
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
+
+    void update_filament_maps_to_config(std::vector<int>& f_maps);
+    void apply_config_for_render(const DynamicConfig &config);
+
+    // 1 based group ids
+    std::vector<int> get_filament_maps() const;
+    FilamentMapMode  get_filament_map_mode() const;
+    // get the group label of filament
+    size_t get_extruder_id(unsigned int filament_id) const;
+
+    const std::vector<std::vector<DynamicPrintConfig>>& get_extruder_filament_info() const { return m_extruder_filament_info; }
+    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& filament_info) { m_extruder_filament_info = filament_info; }
+
+    void set_geometric_unprintable_filaments(const std::vector<std::set<int>> &unprintables_filament_ids) { m_geometric_unprintable_filaments = unprintables_filament_ids; }
+    std::vector<std::set<int>> get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments;}
+
+    void set_slice_used_filaments(const std::vector<unsigned int> &first_layer_used_filaments, const std::vector<unsigned int> &used_filaments){
+        m_slice_used_filaments_first_layer = first_layer_used_filaments;
+        m_slice_used_filaments = used_filaments;
+    }
+    std::vector<unsigned int> get_slice_used_filaments(bool first_layer) const { return first_layer ? m_slice_used_filaments_first_layer : m_slice_used_filaments;}
+
+    /**
+    * @brief Determines the unprintable filaments for each extruder based on its physical attributes
+    *
+    * Currently, the criteria for determining unprintable filament include the following:
+    * 1. TPU filaments can only be placed in the master extruder and must be grouped alone.
+    * 2. We only support at most 1 tpu filament.
+    * 3. An extruder can only accommodate filament with a hardness requirement lower than that of its nozzle.
+    *
+    * @param used_filaments Totally used filaments when slicing
+    * @return A vector of sets representing unprintable filaments for each extruder.Return an empty vecto if extruder num is 1
+    */
+    std::vector<std::set<int>> get_physical_unprintable_filaments(const std::vector<unsigned int>& used_filaments) const;
+
+    std::vector<double> get_extruder_printable_height() const;
+    std::vector<Polygons> get_extruder_printable_polygons() const;
+    std::vector<Polygons> get_extruder_unprintable_polygons() const;
 
     bool                        enable_timelapse_print() const;
 
@@ -954,22 +1139,36 @@ public:
     ConflictResultOpt            get_conflict_result() const { return m_conflict_result; }
 
     // Return 4 wipe tower corners in the world coordinates (shifted and rotated), including the wipe tower brim.
-    std::vector<Point>  first_layer_wipe_tower_corners(bool check_wipe_tower_existance=true) const;
+    Points first_layer_wipe_tower_corners(bool check_wipe_tower_existance=true) const;
 
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     bool &is_flashforge_printer() { return m_isFlashForgePrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
+    WipeTowerType wipe_tower_type() const { return is_BBL_printer() ? WipeTowerType::Type1 : m_config.wipe_tower_type.value; }
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
     void set_calib_params(const Calib_Params& params);
     const Calib_Params& calib_params() const { return m_calib_params; }
     Vec2d translate_to_print_space(const Vec2d &point) const;
+    float               get_wipe_tower_depth() const { return m_wipe_tower_data.depth; }
+    BoundingBoxf        get_wipe_tower_bbx() const { return m_wipe_tower_data.bbx; }
+    Vec2f               get_rib_offset() const { return m_wipe_tower_data.rib_offset; }
+    const FakeWipeTower& get_fake_wipe_tower() const { return m_fake_wipe_tower; }
+
+    void set_check_multi_filaments_compatibility(bool check) { m_need_check_multi_filaments_compatibility = check; }
+    bool need_check_multi_filaments_compatibility() const { return m_need_check_multi_filaments_compatibility; }
+
     // scaled point
     Vec2d translate_to_print_space(const Point &point) const;
     static FilamentTempType get_filament_temp_type(const std::string& filament_type);
     static int get_hrc_by_nozzle_type(const NozzleType& type);
-    static bool check_multi_filaments_compatibility(const std::vector<std::string>& filament_types);
+    static std::vector<std::string> get_incompatible_filaments_by_nozzle(const float nozzle_diameter, const std::optional<NozzleVolumeType> nozzle_volume_type = std::nullopt);
+    static FilamentCompatibilityType check_multi_filaments_compatibility(
+        const std::vector<std::string>& filament_types,
+        const std::vector<int>& nozzle_temperatures,
+        const std::vector<int>& nozzle_temperature_range_lows,
+        const std::vector<int>& nozzle_temperature_range_highs);
     // similar to check_multi_filaments_compatibility, but the input is int, and may be negative (means unset)
     static bool is_filaments_compatible(const std::vector<int>& types);
     // get the compatible filament type of a multi-material object
@@ -1000,16 +1199,19 @@ private:
     //BBS
     static StringObjectException check_multi_filament_valid(const Print &print);
 
+    bool                has_tpu_filament() const;
     bool                invalidate_state_by_config_options(const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys);
 
     void                _make_skirt();
     void                _make_wipe_tower();
+    bool                _clamp_generated_wipe_tower_to_printable_area();
     void                finalize_first_layer_convex_hull();
 
     // Islands of objects and their supports extruded at the 1st layer.
     Polygons            first_layer_islands() const;
 
     PrintConfig                             m_config;
+    MixedFilamentManager                    m_mixed_filament_mgr;
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     PrintObjectPtrs                         m_objects;
@@ -1021,9 +1223,14 @@ private:
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;
+    std::vector<SkirtBrimGroup>             m_skirt_brim_groups;
+    bool                                    m_has_shared_per_object_skirt { false };
     // BBS: collecting extrusion paths to build brim by objs
     std::map<ObjectID, ExtrusionEntityCollection>         m_brimMap;
     std::map<ObjectID, ExtrusionEntityCollection>         m_supportBrimMap;
+    // Orca: cached occupied brim footprints used when grouping per-object skirts.
+    std::map<ObjectID, ExPolygons>                        m_objectBrimAreas;
+    std::map<ObjectID, ExPolygons>                        m_supportBrimAreas;
     // Convex hull of the 1st layer extrusions.
     // It encompasses the object extrusions, support extrusions, skirt, brim, wipe tower.
     // It does NOT encompass user extrusions generated by custom G-code,
@@ -1032,6 +1239,8 @@ private:
     Polygon                                 m_first_layer_convex_hull;
     Points                                  m_skirt_convex_hull;
 
+    std::vector<std::vector<DynamicPrintConfig>> m_extruder_filament_info;
+
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
@@ -1039,6 +1248,10 @@ private:
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;
     bool                                    m_support_used {false};
+    StatisticsByExtruderCount               m_statistics_by_extruder_count;
+
+    std::vector<unsigned int> m_slice_used_filaments;
+    std::vector<unsigned int> m_slice_used_filaments_first_layer;
 
     //BBS: plate's origin
     Vec3d   m_origin;
@@ -1047,9 +1260,18 @@ private:
     //BBS
     ConflictResultOpt m_conflict_result;
     FakeWipeTower     m_fake_wipe_tower;
+    bool              m_has_auto_filament_map_result{false};
+    bool              m_wipe_tower_position_clamped{false};
+    Vec2d             m_wipe_tower_clamp_original{0., 0.};
+    Vec2d             m_wipe_tower_clamp_corrected{0., 0.};
+    mutable std::mutex m_wipe_tower_position_mutex;
     
+    std::vector<std::set<int>> m_geometric_unprintable_filaments;
+
     //SoftFever: calibration
     Calib_Params m_calib_params;
+
+    bool m_need_check_multi_filaments_compatibility{true};
 
     // To allow GCode to set the Print's GCodeExport step status.
     friend class GCode;

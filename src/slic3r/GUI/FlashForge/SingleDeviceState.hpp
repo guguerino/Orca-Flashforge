@@ -21,7 +21,7 @@
 #include "slic3r/GUI/MediaPlayCtrl.h"
 #include "slic3r/GUI/Widgets/ProgressBar.hpp"
 #include "slic3r/GUI/Widgets/ScrolledWindow.hpp"
-#include "slic3r/GUI/Widgets/TempInput.hpp"
+#include "slic3r/GUI/Widgets/NewTempInput.hpp"
 #include "slic3r/GUI/Widgets/FFButton.hpp"
 #include "slic3r/GUI/Widgets/FFScrollButton.hpp"
 #include "slic3r/GUI/SelectMachine.hpp"
@@ -30,9 +30,10 @@
 #include "MultiComDef.hpp"
 #include "MultiComEvent.hpp"
 #include "MaterialStation.hpp"
-#include "PrinterCameraPanel.h"
+#include "FFRTMPVideoCtrl.h"
 #include "TimeLapseVideoPanel.hpp"
 #include <mutex>
+#include <functional>
 
 namespace Slic3r { 
 namespace GUI {
@@ -45,15 +46,19 @@ public:
     LampToolBar(wxWindow* parent);
     void lamp_btn_clicked(wxMouseEvent& event);
     void SetCurId(com_id_t curId);
-    void BindCamera(PrinterCameraPanel* camera);
+    void BindCamera(FFRTMPVideoCtrl* camera, std::function<void()> onActivate = {});
     void SetLampState(bool isOffline, bool isOpen);
+    void SetCameraVisible(bool visible);
     void SetCameraState(bool isOffline);
 
 private:
     Button* m_lamp_btn{nullptr};
     Button* m_camera_btn{nullptr};
     com_id_t m_cur_id;
-    PrinterCameraPanel* m_camera{nullptr};
+    FFRTMPVideoCtrl* m_camera{nullptr};
+    // 点摄像头按钮时的回调：由 SingleDeviceState 提供，负责“重绑当前设备并切流 + 弹窗”。
+    // 为空时退化为直接弹窗（仅显示已绑定设备）。
+    std::function<void()> m_camera_activate_cb;
 };
 
 class MaterialImagePanel : public wxPanel
@@ -121,9 +126,12 @@ public:
     void setCoolingFanSpeed(double fanSpeed);
     void setCoolingFanShow(bool hide);
     void setChamberFanSpeed(double fanSpeed);
+    void updateGridSizer(int pid);
     void switchPage();
 
 private:
+    void logLayoutState(const char* reason) const;
+
     IconText       *m_device_material{nullptr};
     IconText       *m_device_initial_speed{nullptr};
     IconText       *m_device_layer{nullptr};
@@ -132,8 +140,13 @@ private:
     IconBottonText *m_device_z_axis{nullptr};
     IconBottonText *m_device_nozzle_fan{nullptr};
     IconBottonText *m_device_cooling_fan{nullptr};
+    wxFlexGridSizer* m_grid_sizer{nullptr};
+    wxPanel*        m_panel_rows{nullptr};
+    MachineIconCombo* m_device_speed_u1{nullptr};
 
     int m_cur_id = -1;
+    int m_layout_pid = OTHER;
+    wxSize m_last_logged_size{wxDefaultSize};
 
 };
 class G3UDetail : public wxPanel
@@ -233,7 +246,13 @@ private:
 class SingleDeviceState : public wxScrolledWindow
 {
 public:
-    SingleDeviceState(wxWindow* parent, wxWindowID id = wxID_ANY, const wxPoint& pos = wxDefaultPosition, 
+    enum class DevicePageState {
+        NoDevice,
+        Offline,
+        Connected
+    };
+
+    SingleDeviceState(wxWindow* parent, wxWindowID id = wxID_ANY, const wxPoint& pos = wxDefaultPosition,
             const wxSize& size = wxDefaultSize, long style = wxTAB_TRAVERSAL, const wxString& name = wxEmptyString);
     ~SingleDeviceState();
 
@@ -256,7 +275,8 @@ public:
     wxBoxSizer *create_monitoring_page(wxPanel* parent);
     wxBoxSizer* create_machine_control_title();
     wxBoxSizer *create_machine_control_page();
-    void        showMaterialStation(bool show);
+    void showMaterialStation(bool show);
+    void trackBtnClick(std::string str);
     void setupLayout();
     void setupLayoutBusyInfoPage(wxBoxSizer* busySizer,wxPanel* parent);
     void setupLayoutIdleInfoPage(wxBoxSizer* idleSizer,wxPanel* parent);
@@ -264,13 +284,22 @@ public:
     void        setupLayoutIdleCtrlPage(wxBoxSizer* idleSizer, wxPanel* parent);
 
     void msw_rescale();
-    void connectEvent(); 
+    void connectEvent();
+    void UpdateScrollVirtualSize();
+
 
 private:
-    void onConnectWanDevInfoUpdate(ComWanDevInfoUpdateEvent &event);
+    void setDevicePageState(DevicePageState state);
+    void clearCurrentDevice();
+    void OnScrollWinSize(wxSizeEvent& evt);
+    void onConnectWanDevInfoUpdate(ComWanDevInfoUpdateEvent& event);
     void onComDevDetailUpdate(ComDevDetailUpdateEvent &event);
     void onComConnectReady(ComConnectionReadyEvent& event);
     void onConnectExit(ComConnectionExitEvent &event);
+    // 账号登录/登出维护事件：登出(login=false)时关闭视频弹窗、停流并解绑摄像头。
+    void onComWanDevMaintain(ComWanDevMaintainEvent &event);
+    void onComCloudSliceUpdate(ComCloudSliceUpdateEvent& event);
+    void onComJobInfoUpdate(ComJobInfoUpdateEvent& event);
     void onTargetTempModify(wxCommandEvent &event);
     void onModifyTempClicked(wxCommandEvent &event);
     void onDevStateChanged(std::string devState, const com_dev_data_t &data);
@@ -291,12 +320,23 @@ public:
 
 private:
     wxString convertSecondsToHMS(int totalSeconds);
-    void  fillValue(const com_dev_data_t &data,bool wanDev = false);
+    void     updateDeviceInfoPanel(const com_dev_data_t& data);
+    void     fillValue(const com_dev_data_t& data, bool wanDev = false);
+    void     fillCloudValue(const fnet_slice_state_t& data);
+    void fillJobValue(const fnet_job_info_t& info);
 
     void  setPageOffline();
+    // 按“摄像头绑定设备”(m_camera_cur_id) 刷新视频流：拉流/断线/占位，均与页面选中设备解耦。
+    void  refreshCameraStream();
+    // 把摄像头视频流切换到指定设备：关闭旧设备(WAN)推流、重绑并立即按新设备拉流。
+    void  switchCameraStreamTo(int comId);
+    // 点摄像头按钮：把摄像头绑定到当前选中设备(m_cur_id)并切流，然后弹窗显示。
+    void  activateCameraForCurrentDevice();
     std::string getCurLanguage();
+    void  setMaterialName(const std::string& printFileName);
     void  setMaterialPic(const com_dev_data_t& data);
     void  setTempurature(const com_dev_data_t& data);
+    void  setIdlePrinterText(bool isOffline = false);
     void  splitIdleTextLabel();
     void  clearFileList();
     void initFileList(const std::vector<FileItem::FileData>& fileDataList);
@@ -307,6 +347,7 @@ protected:
 
     com_id_t m_cur_id = ComInvalidId;
 
+    DevicePageState m_device_page_state = DevicePageState::NoDevice;
 //UI
     LampToolBar* m_idle_lamp_bar{nullptr};
     LampToolBar* m_busy_lamp_bar{nullptr};
@@ -314,7 +355,7 @@ protected:
     Label*   m_staticText_monitoring{nullptr};
     NewTempInputPanel* m_tempCtrl_panel{ nullptr };
 
-    PrinterCameraPanel* m_camera_panel{nullptr};
+    FFRTMPVideoCtrl* m_camera_panel{nullptr};
 
     wxPanel*         m_machine_ctrl_info_panel{nullptr};
     wxPanel*         m_machine_idle_info_panel{nullptr};
@@ -348,6 +389,10 @@ protected:
 
     Label*              m_staticText_file_head{nullptr};
     //Label*              m_staticText_file_name{nullptr};
+    Label*              m_staticText_cloud_text{nullptr};
+    Label*              m_staticText_cloud_queue_text{nullptr};
+    Label*              m_staticText_cloud_queue_count{nullptr};
+    Label*              m_staticText_cloud_queue_tip{nullptr};
     Label*              m_staticText_count_time{nullptr};
     Label*              m_staticText_time_label{nullptr};
 
@@ -360,14 +405,20 @@ protected:
     Button*             m_print_button{nullptr};
     Button*             m_cancel_button{nullptr};
     CancelPrint*        m_cancel_confirm_page{nullptr};
+    Button*             m_cancel_queue_button{nullptr};
+    Button*             m_retry_print_button{nullptr};
+    Button*             m_cancel_slice_button{nullptr};
+    wxPanel*            m_panel_control_cloud{nullptr};
+    wxPanel*            m_panel_control_print{nullptr};
+    std::string         m_slice_task_id;
 
     bool                m_print_button_pressed_down = false;
     bool                m_clear_fan_pressed_down    = false;
 
 //temperature 
-    TempInput*          m_tempCtrl_top{nullptr}; // 喷头温度
-    TempInput*          m_tempCtrl_bottom{nullptr}; // 平台温度
-    TempInput*          m_tempCtrl_mid{nullptr};    // 腔体温度
+    //TempInput*          m_tempCtrl_top{nullptr}; // 喷头温度
+    //TempInput*          m_tempCtrl_bottom{nullptr}; // 平台温度
+    //TempInput*          m_tempCtrl_mid{nullptr};    // 腔体温度
 
     Button*             m_device_info_button{nullptr};
     Button*             m_lamp_control_button{nullptr};
@@ -388,7 +439,12 @@ protected:
     double              m_last_cooling_fan_speed   = 0.00001;
     double              m_last_left_cooling_fan_speed = 0.00001;
     double              m_last_chamber_fan_speed   = 0.00001;
+    // 摄像头“绑定设备”正在播放的拉流地址（跟随 m_camera_cur_id，与页面选中设备解耦）。
     std::string         m_camera_stream_url;
+    // 摄像头“绑定设备”的 id（与整页 m_cur_id 解耦）：视频画面始终跟随此设备。
+    // 首次选中设备时自动绑定并后台拉流；之后切换设备不改变绑定（画面保持旧设备），
+    // 只有用户点摄像头按钮才重绑为当前选中设备并切流（activateCameraForCurrentDevice）。
+    int                 m_camera_cur_id = -1;
     int                 m_pid = OTHER;
 
     std::string         m_file_pic_url;
@@ -442,6 +498,7 @@ protected:
     std::map<int, FileItem*> m_download_file_list_image_map;
 
     bool m_isNozzlesPrinter{false};
+    bool m_isCloudState{false};
 };
 
 } // namespace GUI

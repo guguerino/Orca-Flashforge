@@ -17,7 +17,7 @@ public:
 	Contour() = default;
 	Contour(const Slic3r::Point *begin, const Slic3r::Point *end, bool open) : m_begin(begin), m_end(end), m_open(open) {}
 	Contour(const Slic3r::Point *data, size_t size, bool open) : Contour(data, data + size, open) {}
-	Contour(const std::vector<Slic3r::Point> &pts, bool open) : Contour(pts.data(), pts.size(), open) {}
+	Contour(const Points &pts, bool open) : Contour(pts.data(), pts.size(), open) {}
 
     const Slic3r::Point *begin()  const { return m_begin; }
     const Slic3r::Point *end()    const { return m_end; }
@@ -224,6 +224,8 @@ public:
 						iy += 1;
 						assert(iy <= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return; 
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -245,6 +247,8 @@ public:
 						iy -= 1;
 						assert(iy >= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return; 
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -270,6 +274,8 @@ public:
 						iy += 1;
 						assert(iy <= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return; 
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -307,6 +313,8 @@ public:
 						iy -= 1;
 						assert(iy >= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return; 
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);

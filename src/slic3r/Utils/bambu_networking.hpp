@@ -4,11 +4,13 @@
 #include <string>
 #include <functional>
 #include <map>
+#include <vector>
 
+#include "libslic3r/AppConfig.hpp"
 extern std::string g_log_folder;
 extern std::string g_log_start_time;
 
-namespace BBL {
+namespace Slic3r {
 
 #define BAMBU_NETWORK_SUCCESS                           0
 #define BAMBU_NETWORK_ERR_INVALID_HANDLE                -1
@@ -36,6 +38,7 @@ namespace BBL {
 #define BAMBU_NETWORK_ERR_PARSE_CONFIG_FAILED           -23
 #define BAMBU_NETWORK_ERR_NO_CORRESPONDING_BUCKET       -24
 #define BAMBU_NETWORK_ERR_GET_INSTANCE_ID_FAILED        -25
+#define BAMBU_NETWORK_SIGNED_ERROR                      -26
 
 //bind error
 #define BAMBU_NETWORK_ERR_BIND_CREATE_SOCKET_FAILED          -1010 //failed to create socket
@@ -78,6 +81,7 @@ namespace BBL {
 #define BAMBU_NETWORK_ERR_PRINT_SP_PATCH_PROJECT_FAILED             -3110 //failed to patch project
 #define BAMBU_NETWORK_ERR_PRINT_SP_POST_TASK_FAILED                 -3120 //failed to post task
 #define BAMBU_NETWORK_ERR_PRINT_SP_WAIT_PRINTER_FAILED              -3130 //failed to wait the ack from printer
+#define BAMBU_NETOWRK_ERR_PRINT_SP_ENC_FLAG_NOT_READY               -3140 //failed to get flag info
 
 //start_local_print   error
 #define BAMBU_NETWORK_ERR_PRINT_LP_FILE_OVER_SIZE                   -4010 //the size of the uploaded file cannot exceed 1 GB
@@ -95,7 +99,6 @@ namespace BBL {
 #define BAMBU_NETWORK_LIBRARY               "bambu_networking"
 #define BAMBU_NETWORK_AGENT_NAME            "bambu_network_agent"
 
-#define BAMBU_NETWORK_AGENT_VERSION         "01.10.01.01"
 
 //iot preset type strings
 #define IOT_PRINTER_TYPE_STRING     "printer"
@@ -112,8 +115,6 @@ namespace BBL {
 #define IOT_JSON_KEY_FILAMENT_ID        "filament_id"
 #define IOT_JSON_KEY_USER_ID            "user_id"
 
-// user callbacks
-typedef std::function<void(int online_login, bool login)> OnUserLoginFn;
 // printer callbacks
 typedef std::function<void(std::string topic_str)>  OnPrinterConnectedFn;
 typedef std::function<void(int status, std::string dev_id, std::string msg)> OnLocalConnectedFn;
@@ -187,7 +188,7 @@ struct detectResult {
 };
 
 /* print job*/
-struct PrintParams {
+struct PrintParams_Legacy {
     /* basic info */
     std::string     dev_id;
     std::string     task_name;
@@ -228,6 +229,56 @@ struct PrintParams {
     std::string     extra_options;
 };
 
+/* print job*/
+struct PrintParams {
+    /* basic info */
+    std::string     dev_id;
+    std::string     task_name;
+    std::string     project_name;
+    std::string     preset_name;
+    std::string     filename;
+    std::string     config_filename;
+    int             plate_index;
+    std::string     ftp_folder;
+    std::string     ftp_file;
+    std::string     ftp_file_md5;
+    std::string     nozzle_mapping;
+    std::string     ams_mapping;
+    std::string     ams_mapping2;
+    std::string     ams_mapping_info;
+    std::string     nozzles_info;
+    std::string     connection_type;
+    std::string     comments;
+    int             origin_profile_id = 0;
+    int             stl_design_id = 0;
+    std::string     origin_model_id;
+    std::string     print_type;
+    std::string     dst_file;
+    std::string     dev_name;
+
+    /* access options */
+    std::string     dev_ip;
+    bool            use_ssl_for_ftp;
+    bool            use_ssl_for_mqtt;
+    std::string     username;
+    std::string     password;
+
+    /*user options */
+    bool            task_bed_leveling;      /* bed leveling of task */
+    bool            task_flow_cali;         /* flow calibration of task */
+    bool            task_vibration_cali;    /* vibration calibration of task */
+    bool            task_layer_inspect;     /* first layer inspection of task */
+    bool            task_record_timelapse;  /* record timelapse of task */
+    bool            task_use_ams;
+    std::string     task_bed_type;
+    std::string     extra_options;
+    int             auto_bed_leveling{ 0 };
+    int             auto_flow_cali{ 0 };
+    int             auto_offset_cali{ 0 };
+    bool            task_ext_change_assist;
+    bool            try_emmc_print;
+};
+
 struct TaskQueryParams
 {
     std::string dev_id;
@@ -251,6 +302,87 @@ struct CertificateInformation {
     std::string     start_date;
     std::string     end_date;
     std::string     serial_number;
+};
+
+struct NetworkLibraryVersion {
+    const char* version;
+    const char* display_name;
+    const char* url_override;
+    bool is_latest;
+    const char* warning;
+};
+
+static const NetworkLibraryVersion AVAILABLE_NETWORK_VERSIONS[] = {
+    {"02.03.00.62", "02.03.00.62", nullptr, true, nullptr},
+    {"02.01.01.52", "02.01.01.52", nullptr, false, nullptr},
+    {"02.00.02.50", "02.00.02.50", nullptr, false, "This version may crash on startup due to Bambu Lab's signature verification."},
+    {BAMBU_NETWORK_AGENT_VERSION_LEGACY, BAMBU_NETWORK_AGENT_VERSION_LEGACY " (legacy)", nullptr, false, nullptr},
+};
+
+static const size_t AVAILABLE_NETWORK_VERSIONS_COUNT = sizeof(AVAILABLE_NETWORK_VERSIONS) / sizeof(AVAILABLE_NETWORK_VERSIONS[0]);
+
+inline const char* get_latest_network_version() {
+    for (size_t i = 0; i < AVAILABLE_NETWORK_VERSIONS_COUNT; ++i) {
+        if (AVAILABLE_NETWORK_VERSIONS[i].is_latest)
+            return AVAILABLE_NETWORK_VERSIONS[i].version;
+    }
+    return AVAILABLE_NETWORK_VERSIONS[0].version;
+}
+
+struct NetworkLibraryVersionInfo {
+    std::string version;
+    std::string base_version;
+    std::string suffix;
+    std::string display_name;
+    std::string url_override;
+    bool is_latest;
+    std::string warning;
+    bool is_discovered;
+
+    static NetworkLibraryVersionInfo from_static(const NetworkLibraryVersion& v) {
+        return {
+            v.version,
+            v.version,
+            "",
+            v.display_name,
+            v.url_override ? v.url_override : "",
+            v.is_latest,
+            v.warning ? v.warning : "",
+            false
+        };
+    }
+
+    static NetworkLibraryVersionInfo from_discovered(const std::string& full_version,
+                                                      const std::string& base,
+                                                      const std::string& sfx) {
+        return {full_version, base, sfx, full_version, "", false, "", true};
+    }
+};
+
+inline std::string extract_base_version(const std::string& full_version) {
+    auto pos = full_version.find('-');
+    return (pos == std::string::npos) ? full_version : full_version.substr(0, pos);
+}
+
+inline std::string extract_suffix(const std::string& full_version) {
+    auto pos = full_version.find('-');
+    return (pos == std::string::npos) ? "" : full_version.substr(pos + 1);
+}
+
+std::vector<NetworkLibraryVersionInfo> get_all_available_versions();
+
+struct NetworkLibraryLoadError {
+    bool has_error = false;
+    std::string message;
+    std::string technical_details;
+    std::string attempted_path;
+};
+
+enum class MessageFlag : int
+{
+    MSG_FLAG_NONE = 0,
+    MSG_SIGN      = 1 << 0,
+    MSG_ENCRYPT   = 1 << 1,
 };
 
 }

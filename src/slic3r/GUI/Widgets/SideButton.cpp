@@ -4,7 +4,7 @@
 #include <wx/dcclient.h>
 #include <wx/dcgraph.h>
 
-BEGIN_EVENT_TABLE(SideButton, wxPanel)
+BEGIN_EVENT_TABLE(SideButton, wxWindow)
 EVT_LEFT_DOWN(SideButton::mouseDown)
 EVT_LEFT_UP(SideButton::mouseReleased)
 EVT_PAINT(SideButton::paintEvent)
@@ -22,11 +22,9 @@ SideButton::SideButton(wxWindow* parent, wxString text, wxString icon, long stly
     extra_size = wxSize(38, 10);
     text_margin = 15;
 #endif
-    
+
     icon_offset = 0;
     text_orientation = HO_Left;
-    
-
 
     border_color.append(0x999999, StateColor::Disabled);
     border_color.append(wxColour(0, 163, 237), StateColor::Pressed);
@@ -208,7 +206,7 @@ void SideButton::dorender(wxDC& dc, wxDC& text_dc)
     dc.SetPen(wxPen(border_color.colorForStates(states)));
     int pen_width = dc.GetPen().GetWidth();
 
-    
+
     // draw icon style
     if (icon.bmp().IsOk()) {
         if (radius > 1e-5) {
@@ -280,11 +278,11 @@ void SideButton::dorender(wxDC& dc, wxDC& text_dc)
     auto text = GetLabel();
     if (!text.IsEmpty()) {
         pt.y += (rcContent.height - textSize.y) / 2;
-
         text_dc.SetFont(GetFont());
         text_dc.SetTextForeground(text_color.colorForStates(states));
         text_dc.DrawText(text, pt);
     }
+
 }
 
 void SideButton::messureSize()

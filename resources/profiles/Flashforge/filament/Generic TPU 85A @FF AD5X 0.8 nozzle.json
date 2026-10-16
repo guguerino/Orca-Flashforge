@@ -1,5 +1,7 @@
 {
-    "type": "filament",
+    "compatible_printers": [
+        "Flashforge AD5X 0.8 nozzle"
+    ],
     "cool_plate_temp": [
         "45"
     ],
@@ -21,21 +23,21 @@
     "filament_settings_id": [
         "Generic TPU 85A @FF AD5X 0.8 nozzle"
     ],
+    "filament_vendor": [
+        "Generic"
+    ],
     "from": "system",
     "inherits": "Flashforge Generic TPU",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Generic TPU 85A @FF AD5X 0.8 nozzle",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
-    "compatible_printers": [
-    "Flashforge AD5X 0.8 nozzle"
-  ],
     "nozzle_temperature": [
         "220"
     ],
     "nozzle_temperature_initial_layer": [
         "220"
     ],
+    "setting_id": "qRqhbOYn5TMfccem",
     "slow_down_layer_time": [
         "12"
     ],
@@ -51,5 +53,6 @@
     "textured_plate_temp_initial_layer": [
         "45"
     ],
+    "type": "filament",
     "version": "2.1.1.0"
 }

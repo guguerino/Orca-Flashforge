@@ -109,6 +109,7 @@ private:
     //DeviceObject                     *m_device_info {nullptr};
     BindInfo                *m_bind_info{nullptr};
     std::shared_ptr<BindJob>          m_bind_job;
+    int                      m_bind_start_stamp;
 
 public:
     BindMachineDialog();
@@ -127,6 +128,9 @@ public:
     void     on_destroy();
     void     on_result_ok(wxCommandEvent& event);
     void     on_user_image_updated(wxCommandEvent& event);
+    
+    void trackLogDataBindStart();
+    void trackLogDataBindEnd(std::string res, std::string msg);
 };
 
 // unbind

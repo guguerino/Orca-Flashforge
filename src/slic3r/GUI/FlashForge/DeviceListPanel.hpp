@@ -8,6 +8,7 @@
 #include "slic3r/GUI/Widgets/Button.hpp"
 #include "slic3r/GUI/Widgets/ComboBox.hpp"
 #include "slic3r/GUI/Widgets/PopupWindow.hpp"
+#include "slic3r/GUI/Widgets/WebView.hpp"
 #include "MultiComDef.hpp"
 #include "MultiComMgr.hpp"
 #include "MultiComEvent.hpp"
@@ -112,6 +113,7 @@ private:
 private:
     std::string     m_dev_id;
     DeviceInfo      m_info;
+    bool            m_unbinding {false};
     wxStaticText*   m_name_text {nullptr};
     wxStaticBitmap* m_icon {nullptr};
     wxStaticBitmap* m_warning_icon {nullptr};
@@ -256,6 +258,7 @@ private:
     FFToggleButton* m_lan_btn {nullptr};
     FFBitmapToggleButton* m_static_btn {nullptr};
     
+    wxWebView*        m_webBanner{nullptr};
     wxSimplebook*   m_simple_book {nullptr};
     wxPanel*        m_no_device_panel {nullptr};
     wxStaticBitmap* m_no_device_bitmap {nullptr};

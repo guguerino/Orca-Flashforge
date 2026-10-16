@@ -1,4 +1,17 @@
 {
+    "enable_tower_interface_features": "1",
+    "prime_tower_brim_width": "-1",
+    "prime_tower_infill_gap": "165%",
+    "prime_tower_skip_points": "0",
+    "prime_tower_width": "35",
+    "print_extruder_id": [
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard"
+    ],
+    "version": "2.1.1.0",
+    "wipe_tower_wall_type": "rib",
     "type": "process",
     "bottom_solid_infill_flow_ratio": "0.98",
     "bridge_flow": "0.98",
@@ -9,7 +22,7 @@
     "enable_prime_tower": "1",
     "exclude_object": "1",
     "from": "system",
-    "setting_id": "GP002",
+    "setting_id": "3ei5QadUbDuTI3hi",
     "instantiation": "true",
     "filter_out_gap_fill": "0.1",
     "gap_fill_target": "topbottom",
@@ -23,8 +36,6 @@
     "is_custom_defined": "0",
     "name": "0.20mm Standard @FF AD5X",
     "only_one_wall_top": "1",
-    "prime_tower_brim_width": "5",
-    "prime_tower_width": "30",
     "prime_volume": "40",
     "print_settings_id": "0.20mm Standard @FF AD5X",
     "seam_slope_inner_walls": "1",
@@ -34,7 +45,6 @@
     "support_interface_spacing": "0.2",
     "support_type": "tree(auto)",
     "top_solid_infill_flow_ratio": "0.98",
-    "version": "2.1.1.0",
     "wipe_tower_cone_angle": "10",
     "wipe_tower_extra_spacing": "110%"
 }

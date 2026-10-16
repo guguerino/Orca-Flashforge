@@ -175,7 +175,7 @@ bool PrintDevLocalFileDlg::setupData(com_id_t comId, const com_gcode_data_t &gco
     // materials
     m_materialSizer->Clear(true);
     m_materialMapItems.clear();
-    if (gcodeData.useMatlStation) {
+    if (gcodeData.useMatlStation || FFUtils::isNozzlesPrinter(FFUtils::getPid(m_comId))) {
         for (size_t i = 0; i < gcodeData.gcodeToolDatas.size(); ++i) {
             int toolId = gcodeData.gcodeToolDatas[i].toolId;
             int slotId = gcodeData.gcodeToolDatas[i].slotId;
@@ -197,7 +197,7 @@ bool PrintDevLocalFileDlg::setupData(com_id_t comId, const com_gcode_data_t &gco
 
     // levelling
     if (wxGetApp().app_config->get("levelling").empty()) {
-        m_levelChk->SetValue(false);
+        m_levelChk->SetValue(FFUtils::isNozzlesPrinter(FFUtils::getPid(m_comId)));
     } else {
         m_levelChk->SetValue(wxGetApp().app_config->get("levelling") == "true");
     }
@@ -205,9 +205,17 @@ bool PrintDevLocalFileDlg::setupData(com_id_t comId, const com_gcode_data_t &gco
     // AMS
     bool useAms = FFUtils::isPrinterSupportAms(devDetail->pid);
     m_enableAmsChk->SetValue(wxString::FromUTF8(gcodeData.fileName).Right(4).IsSameAs(".3mf", false));
-    m_enableAmsChk->Show(useAms);
-    m_enableAmsLbl->Show(useAms);
-    m_amsTipWxBmp->Show(useAms);
+    if (FFUtils::isNozzlesPrinter(FFUtils::getPid(comId))) {
+        m_amsTipLbl->Hide();
+        m_enableAmsChk->Hide();
+        m_enableAmsLbl->Hide();
+        m_amsTipWxBmp->Hide();
+    } else {
+        m_amsTipLbl->Show(useAms);
+        m_enableAmsChk->Show(useAms);
+        m_enableAmsLbl->Show(useAms);
+        m_amsTipWxBmp->Show(useAms);
+    }
 
     updateConfigState(devDetail, true);
     updatePrintButtonState();
@@ -340,7 +348,7 @@ void PrintDevLocalFileDlg::onWanDevInfoUpdate(ComWanDevInfoUpdateEvent &event)
     }
     bool valid;
     const com_dev_data_t &devData = MultiComMgr::inst()->devData(event.id, &valid);
-    if (valid && devData.connectMode == COM_CONNECT_WAN && devData.wanDevInfo.status == "offline") {
+    if (valid && is_wan_device_offline(devData)) {
         EndModal(wxID_CANCEL);
     }
 }
@@ -377,20 +385,26 @@ bool PrintDevLocalFileDlg::updateConfigState(const fnet_dev_detail_t *devDetail,
         m_flowCalibrationChk->SetValue(false);
     } else {
         std::string value = wxGetApp().app_config->get("flowCalibration");
-        m_flowCalibrationChk->SetValue(value.empty() || value == "true");
+        if (FFUtils::isNozzlesPrinter(FFUtils::getPid(m_comId))) {
+            m_flowCalibrationChk->SetValue(value == "true");
+        } else {
+            m_flowCalibrationChk->SetValue(value.empty() || value == "true");
+        }
     }
     m_flowCalibrationChk->Show(isSupportLidar);
     m_flowCalibrationLbl->Show(isSupportLidar);
 
     // first layer inspection
-    if (!isSupportLidar) {
+   /* if (!isSupportLidar) {
         m_firstLayerInspectionChk->SetValue(false);
     } else {
         std::string value = wxGetApp().app_config->get("firstLayerInspection");
         m_firstLayerInspectionChk->SetValue(value.empty() || value == "true");
     }
     m_firstLayerInspectionChk->Show(isSupportLidar);
-    m_firstLayerInspectionLbl->Show(isSupportLidar);
+    m_firstLayerInspectionLbl->Show(isSupportLidar);*/
+    m_firstLayerInspectionChk->Hide();
+    m_firstLayerInspectionLbl->Hide();
 
     // time lapse video
     if (!isSupportCamera || wxGetApp().app_config->get("timeLapseVideo").empty()) {
@@ -405,14 +419,16 @@ bool PrintDevLocalFileDlg::updateConfigState(const fnet_dev_detail_t *devDetail,
     std::vector<std::pair<FFCheckBox*, wxStaticText*>> configPairs;
     configPairs.emplace_back(m_levelChk, m_levelLbl);
     if (FFUtils::isPrinterSupportAms(devDetail->pid)) {
-        configPairs.emplace_back(m_enableAmsChk, m_enableAmsLbl);
+        if (!FFUtils::isNozzlesPrinter(FFUtils::getPid(m_comId))) {
+            configPairs.emplace_back(m_enableAmsChk, m_enableAmsLbl);
+        }
     }
     if (isSupportLidar) {
         configPairs.emplace_back(m_flowCalibrationChk, m_flowCalibrationLbl);
     }
-    if (isSupportLidar) {
+    /*if (isSupportLidar) {
         configPairs.emplace_back(m_firstLayerInspectionChk, m_firstLayerInspectionLbl);
-    }
+    }*/
     if (isSupportCamera) {
         configPairs.emplace_back(m_timeLapseVideoChk, m_timeLapseVideoLbl);
     }

@@ -6,7 +6,6 @@
 #include <wx/bookctrl.h>
 #include <wx/sizer.h>
 
-class ModeSizer;
 class ScalableButton;
 class Button;
 
@@ -21,6 +20,7 @@ public:
     ~ButtonsListCtrl() {}
 
     void OnPaint(wxPaintEvent&);
+    wxBoxSizer* ExtraSizer();
     void SetSelection(int sel);
     void UpdateMode();
     void Rescale();
@@ -28,17 +28,22 @@ public:
     void RemovePage(size_t n);
     bool SetPageImage(size_t n, const std::string& bmp_name) const;
     void SetPageText(size_t n, const wxString& strText);
+    void SetCompact(size_t n, bool compact); // ORCA
     wxString GetPageText(size_t n) const;
+    wxFlexGridSizer* GetBtnsSizer(){return m_buttons_sizer;}; // ORCA
 
 private:
     wxFlexGridSizer*                m_buttons_sizer;
     wxBoxSizer*                     m_sizer;
+    wxBoxSizer*                     m_main_sizer;
     // BBS: use Button
     std::vector<Button*>            m_pageButtons;
     int                             m_selection {-1};
     int                             m_btn_margin;
     int                             m_line_margin;
+    wxBoxSizer*                     m_extra_sizer{nullptr};
     //ModeSizer*                      m_mode_sizer {nullptr};
+    std::vector<wxString>           m_pageLabels; // ORCA
 };
 
 class Notebook: public wxBookCtrlBase
@@ -76,6 +81,8 @@ public:
 
         m_controlSizer = new wxBoxSizer(IsVertical() ? wxHORIZONTAL : wxVERTICAL);
         m_controlSizer->Add(m_bookctrl, wxSizerFlags(1).Expand());
+
+
         wxSizerFlags flags;
         if (IsVertical())
             flags.Expand();
@@ -348,6 +355,8 @@ public:
         }
     }
 
+    wxBoxSizer* TopSizer() { return static_cast<ButtonsListCtrl*>(m_bookctrl)->ExtraSizer(); }
+
 protected:
     virtual void UpdateSelectedPage(size_t WXUNUSED(newsel)) override
     {
@@ -398,6 +407,7 @@ private:
 
     wxShowEffect m_showEffect,
                  m_hideEffect;
+    wxBoxSizer*  m_top_sizer;
 
     unsigned m_showTimeout,
              m_hideTimeout;

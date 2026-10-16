@@ -17,14 +17,16 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     if (libraryHandle == INVALID_LIBRARY_HANDLE) {
         return;
     }
-#define INIT_FUNC_PTR(ptr, func)\
-        ptr = (decltype(&func))getFuncPtr(libraryHandle, #func);\
-        if (ptr == nullptr) {\
-            return;\
-        }
+#define INIT_FUNC_PTR(ptr, func) \
+    ptr = (decltype(&func)) getFuncPtr(libraryHandle, #func); \
+    if (ptr == nullptr) { \
+        printf("INIT_FUNC_PTR %s failed\n", #func); \
+        return; \
+    }
     INIT_FUNC_PTR(initlize, fnet_initlize);
     INIT_FUNC_PTR(uninitlize, fnet_uninitlize);
     INIT_FUNC_PTR(getVersion, fnet_getVersion);
+    INIT_FUNC_PTR(getHomePageUrl, fnet_getHomePageUrl);
     INIT_FUNC_PTR(setUserAgent, fnet_setUserAgent);
     INIT_FUNC_PTR(getLanDevList, fnet_getLanDevList);
     INIT_FUNC_PTR(freeLanDevInfos, fnet_freeLanDevInfos);
@@ -85,6 +87,8 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     INIT_FUNC_PTR(bindAccountRelp, fnet_bindAccountRelp);
     INIT_FUNC_PTR(freeBindAccountRelpResult, fnet_freeBindAccountRelpResult);
     INIT_FUNC_PTR(uploadAiImageClound, fnet_uploadAiImageClound);
+    INIT_FUNC_PTR(uploadLogFileCloud, fnet_uploadLogFileCloud);
+    INIT_FUNC_PTR(uploadLogFileCloudEx, fnet_uploadLogFileCloudEx);
     INIT_FUNC_PTR(freeCloundFileData, fnet_freeCloundFileData);
     INIT_FUNC_PTR(getUserAiPointsInfo, fnet_getUserAiPointsInfo);
     INIT_FUNC_PTR(freeUserAiPointsInfo, fnet_freeUserAiPointsInfo);
@@ -110,11 +114,26 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     INIT_FUNC_PTR(userClickCount, fnet_userClickCount);
     INIT_FUNC_PTR(addPrintListModel, fnet_addPrintListModel);
     INIT_FUNC_PTR(removePrintListModel, fnet_removePrintListModel);
+    INIT_FUNC_PTR(navLikeModel, fnet_navLikeModel);
     INIT_FUNC_PTR(reportModel, fnet_reportModel);
     INIT_FUNC_PTR(reportTrackingData, fnet_reportTrackingData);
     INIT_FUNC_PTR(reportTrackingDataBatch, fnet_reportTrackingDataBatch);
+    INIT_FUNC_PTR(getSystemMessage, fnet_getSystemMessage);
+    INIT_FUNC_PTR(postReadSystemMessage, fnet_postReadSystemMessage);
+    INIT_FUNC_PTR(freeSystemMessage, fnet_freeSystemMessage);
+    INIT_FUNC_PTR(getMonitorMessage, fnet_getMonitorMessage);
+    INIT_FUNC_PTR(retrySliceTask, fnet_retrySliceTask);
+    INIT_FUNC_PTR(cancelSliceTask, fnet_cancelSliceTask);
+    INIT_FUNC_PTR(freeSliceState, fnet_freeSliceState);
+    INIT_FUNC_PTR(freeJobInfo, fnet_freeJobInfo);
     INIT_FUNC_PTR(doBusGetRequest, fnet_doBusGetRequest);
     INIT_FUNC_PTR(doBusPostRequest, fnet_doBusPostRequest);
+    INIT_FUNC_PTR(getSettingList2, fnet_getSettingList2);
+    INIT_FUNC_PTR(getSettingList, fnet_getSettingList);
+    INIT_FUNC_PTR(getUserPresets, fnet_getUserPresets);
+    INIT_FUNC_PTR(requestSettingId, fnet_requestSettingId);
+    INIT_FUNC_PTR(putSetting, fnet_putSetting);
+    INIT_FUNC_PTR(deleteSetting, fnet_deleteSetting);
     INIT_FUNC_PTR(getMqttConfig, fnet_getMqttConfig);
     INIT_FUNC_PTR(freeMqttConfig, fnet_freeMqttConfig);
     INIT_FUNC_PTR(createConnection, fnet_createConnection);
@@ -128,10 +147,14 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     INIT_FUNC_PTR(freeSyncLoginInfo, fnet_freeSyncLoginInfo);
     INIT_FUNC_PTR(freeSyncBindInfo, fnet_freeSyncBindInfo);
     INIT_FUNC_PTR(freeSyncOnlineInfo, fnet_freeSyncOnlineInfo);
+    INIT_FUNC_PTR(freeUploadLogInfo, fnet_freeUploadLogInfo);
     INIT_FUNC_PTR(allocString, fnet_allocString);
     INIT_FUNC_PTR(freeString, fnet_freeString);
-    if (initlize(serverSettingsPath, &logSettings) == FNET_OK && strcmp(getVersion(), "3.0.0") == 0) {
+    if (initlize(serverSettingsPath, &logSettings) == FNET_OK && strcmp(getVersion(), "3.4.3") == 0) {
         m_isOk = true;
+    }
+    else {
+        printf("initlize flashnetwork failed, version = %s", getVersion());
     }
 }
 

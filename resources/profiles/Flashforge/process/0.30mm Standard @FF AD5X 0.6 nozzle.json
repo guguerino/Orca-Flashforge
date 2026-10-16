@@ -1,4 +1,10 @@
 {
+    "enable_tower_interface_features": "1",
+    "prime_tower_brim_width": "-1",
+    "prime_tower_infill_gap": "165%",
+    "prime_tower_skip_points": "0",
+    "prime_tower_width": "35",
+    "wipe_tower_wall_type": "rib",
     "type": "process",
     "bottom_solid_infill_flow_ratio": "0.97",
     "bridge_flow": "0.96",
@@ -8,7 +14,7 @@
     "enable_prime_tower": "1",
     "exclude_object": "1",
     "from": "system",
-    "setting_id": "GP004",
+    "setting_id": "JlNWAgYsPK0pEnf4",
     "instantiation": "true",
     "compatible_printers": [
     "Flashforge AD5X 0.6 nozzle"
@@ -21,9 +27,6 @@
     "is_custom_defined": "0",
     "name": "0.30mm Standard @FF AD5X 0.6 nozzle",
     "only_one_wall_top": "1",
-    "prime_tower_brim_width": "6",
-    "prime_tower_width": "30",
-    "prime_volume": "60",
     "print_settings_id": "0.30mm Standard @FF AD5X 0.6 nozzle",
     "skirt_loops": "0",
     "slowdown_for_curled_perimeters": "0",
@@ -32,7 +35,14 @@
     "support_line_width": "0.6",
     "support_top_z_distance": "0.3",
     "top_solid_infill_flow_ratio": "0.97",
-    "version": "2.1.1.0",
     "wipe_tower_cone_angle": "10",
-    "wipe_tower_extra_spacing": "110%"
+    "wipe_tower_extra_spacing": "110%",
+    "prime_volume": "40",
+    "print_extruder_id": [
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard"
+    ],
+    "version": "2.1.1.0"
 }

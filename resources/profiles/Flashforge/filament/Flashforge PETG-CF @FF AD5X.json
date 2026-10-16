@@ -1,5 +1,7 @@
 {
-    "type": "filament",
+    "compatible_printers": [
+        "Flashforge AD5X 0.4 nozzle"
+    ],
     "cool_plate_temp": [
         "0"
     ],
@@ -21,9 +23,10 @@
     "filament_start_gcode": [
         "; filament start gcode\n;right_extruder_material:PETG-CF\n"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "hot_plate_temp": [
         "75"
     ],
@@ -31,14 +34,13 @@
         "75"
     ],
     "inherits": "Flashforge Generic PETG-CF10",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PETG-CF @FF AD5X",
-    "compatible_printers": [
-    "Flashforge AD5X 0.4 nozzle"
-  ],
     "nozzle_temperature": [
         "240"
     ],
+    "setting_id": "eKWJW36I5fVHwjWD",
     "textured_cool_plate_temp": [
         "75"
     ],
@@ -51,5 +53,6 @@
     "textured_plate_temp_initial_layer": [
         "75"
     ],
+    "type": "filament",
     "version": "2.1.1.0"
 }

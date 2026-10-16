@@ -16,6 +16,7 @@
 #include "ConnectPrinter.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "Jobs/PlaterWorker.hpp"
+#include "GuiColor.hpp"
 
 #include <wx/progdlg.h>
 #include <wx/clipbrd.h>
@@ -85,11 +86,11 @@ bool MultiSend::send_to_printer(int plate_idx, const com_id_list_t& com_ids, con
                 wanSendInfo.comId = id;
                 wanSendInfo.serialNumber = data.wanDevInfo.serialNumber;
                 wanSendInfo.devTopic = data.wanDevInfo.devTopic;
-                m_wan_ids_to_send.emplace(data.wanDevInfo.devId, wanSendInfo);
-                m_send_jobs.emplace(id, ResultInfo{-1, true, false, Result_Ok, 0.0});
+                m_wan_ids_to_send[data.wanDevInfo.devId] = wanSendInfo;
+                m_send_jobs[id] = ResultInfo{-1, true, false, Result_Ok, 0.0};
             } else {
                 m_lan_ids_to_send.emplace_back(id);                
-                m_send_jobs.emplace(id, ResultInfo{-1, false, false, Result_Ok, 0.0});
+                m_send_jobs[id] = ResultInfo{-1, false, false, Result_Ok, 0.0};
             }
         }
     }
@@ -762,6 +763,9 @@ void MachineItem::prepare_build()
 
     int name_width = width - m_checkBox->GetSize().x - height;
     m_nameLbl = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize);
+#ifdef __APPLE__
+    m_nameLbl->SetForegroundColour(wxColour("#333333"));
+#endif
     // m_nameLbl->SetBackgroundColour(wxColour("#ff0000"));
     m_nameLbl->SetMinSize(wxSize(name_width, -1));
     m_nameLbl->SetMaxSize(wxSize(name_width, -1));
@@ -883,6 +887,7 @@ SendToPrinterDialog::SendToPrinterDialog(Plater *plater/*=nullptr*/)
     m_sizer_basic_weight->Add(timeimg, 0, wxUP | wxDOWN, FromDIP(5));
     m_stext_time = new wxStaticText(m_topPanel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_RIGHT);
     m_stext_time->SetFont(Label::Body_14);
+    m_stext_time->SetForegroundColour(wxColour("#333333"));
     m_sizer_basic_weight->AddSpacer(FromDIP(6));
     m_sizer_basic_weight->Add(m_stext_time, 0, wxUP | wxDOWN, FromDIP(5));
     m_sizer_basic->Add(m_sizer_basic_weight, 0, wxALIGN_CENTER, 0);
@@ -892,6 +897,7 @@ SendToPrinterDialog::SendToPrinterDialog(Plater *plater/*=nullptr*/)
     m_sizer_basic_time->Add(weightimg, 0, wxUP | wxDOWN, FromDIP(5));
     m_stext_weight = new wxStaticText(m_topPanel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
     m_stext_weight->SetFont(Label::Body_14);
+    m_stext_weight->SetForegroundColour(wxColour("#333333"));
     m_sizer_basic_time->AddSpacer(FromDIP(6));
     m_sizer_basic_time->Add(m_stext_weight, 0, wxUP | wxDOWN, FromDIP(5));
     m_sizer_basic->Add(m_sizer_basic_time, 0, wxALIGN_CENTER, 0);
@@ -1052,6 +1058,7 @@ SendToPrinterDialog::SendToPrinterDialog(Plater *plater/*=nullptr*/)
     wxPanel* network_panel = new wxPanel(this);
     network_panel->SetBackgroundColour(*wxWHITE);
     m_selectPrinterLbl = new wxStaticText(network_panel, wxID_ANY, _L("Select Printer"));
+    m_selectPrinterLbl->SetForegroundColour(wxColour("#333333"));
     StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
                             std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered),
                             std::pair<wxColour, int>(wxColour(0, 150, 136), StateColor::Normal));
@@ -1277,6 +1284,7 @@ SendToPrinterDialog::SendToPrinterDialog(Plater *plater/*=nullptr*/)
     init_bind();
     CenterOnParent();
     wxGetApp().UpdateDlgDarkUI(this);
+    apply_color_mode();
 }
 
 wxString SendToPrinterDialog::format_text(wxString &m_msg)
@@ -1391,6 +1399,53 @@ void SendToPrinterDialog::update_print_error_info(int code, std::string msg, std
     m_print_error_code = code;
     m_print_error_msg = msg;
     m_print_error_extra = extra;
+}
+
+void SendToPrinterDialog::on_change_color_mode()
+{
+    wxGetApp().UpdateDlgDarkUI(this);
+    apply_color_mode();
+}
+
+void SendToPrinterDialog::apply_color_mode()
+{
+#ifdef __APPLE__
+    const wxColour print_info_text_colour("#333333");
+    const wxColour send_text_colour("#ffffff");
+#elif defined(__WINDOWS__)
+    const bool     is_dark = wxGetApp().dark_mode();
+    const wxColour print_info_text_colour(is_dark ? wxColour("#EFEFF0") : wxColour("#333333"));
+    const wxColour send_text_colour(is_dark ? wxColour("#333333") : wxColour("#ffffff"));
+#else
+    const bool     is_dark = wxGetApp().dark_mode();
+    const wxColour print_info_text_colour(is_dark ? wxColour("#EFEFF0") : wxColour("#333333"));
+    const wxColour send_text_colour("#ffffff");
+#endif
+
+    if (m_stext_time) {
+        m_stext_time->SetForegroundColour(print_info_text_colour);
+    }
+    if (m_stext_weight) {
+        m_stext_weight->SetForegroundColour(print_info_text_colour);
+    }
+    if (m_selectPrinterLbl) {
+        m_selectPrinterLbl->SetForegroundColour(print_info_text_colour);
+    }
+#if defined(__WINDOWS__)
+    auto set_print_config_label_colour = [print_info_text_colour](wxStaticText* label) {
+        if (label) {
+            label->SetForegroundColour(print_info_text_colour);
+        }
+    };
+    set_print_config_label_colour(m_levelLbl);
+    set_print_config_label_colour(m_enableAmsLbl);
+    set_print_config_label_colour(m_flowCalibrationLbl);
+    set_print_config_label_colour(m_firstLayerInspectionLbl);
+    set_print_config_label_colour(m_timeLapseVideoLbl);
+#endif
+    if (m_sendBtn) {
+        m_sendBtn->SetFontUniformColor(send_text_colour);
+    }
 }
 
 void SendToPrinterDialog::prepare(int print_plate_idx, bool send_and_print)
@@ -1512,6 +1567,72 @@ void SendToPrinterDialog::update_user_machine_list()
     Update();
 }
 
+void SendToPrinterDialog::set_first_machine_filaments(bool only_unselected /*= false*/)
+{ 
+    if (m_machineItemList.empty()) {
+        return;
+    }
+    MachineItem* selected_machine = nullptr;
+    for (auto machine : m_machineItemList) {
+        if (machine->IsChecked()) {
+            selected_machine = machine;
+            break;
+        }
+    }
+    if (!selected_machine) {
+        selected_machine = m_machineItemList.front();
+    }
+    com_id_t comId = selected_machine->data().comId;
+    bool                     valid;
+    const fnet_dev_detail_t* devDetail = MultiComMgr::inst()->devData(comId, &valid).devDetail;
+    if (!valid || !devDetail) {
+        return;
+    }
+    const fnet_matl_station_info_t& matlStationInfo = devDetail->matlStationInfo;
+    if (matlStationInfo.slotCnt <= 0 || !matlStationInfo.slotInfos) {
+        return;
+    }
+    std::unordered_map<int, wxColour> slotColors;
+    for (int i = 0; i < matlStationInfo.slotCnt; i++) {
+        if (matlStationInfo.slotInfos[i].hasFilament && matlStationInfo.slotInfos[i].materialColor) {
+            slotColors[i] = wxColour(matlStationInfo.slotInfos[i].materialColor);
+        }
+    }
+    auto calc_color_distance = [](wxColour c1, wxColour c2) {
+        float lab[2][3];
+        RGB2Lab(c1.Red(), c1.Green(), c1.Blue(), &lab[0][0], &lab[0][1], &lab[0][2]);
+        RGB2Lab(c2.Red(), c2.Green(), c2.Blue(), &lab[1][0], &lab[1][1], &lab[1][2]);
+
+        return DeltaE76(lab[0][0], lab[0][1], lab[0][2], lab[1][0], lab[1][1], lab[1][2]);
+    };
+    for (int j = 0; j < m_materialMapItems.size(); j++) {
+        auto& item = m_materialMapItems[j];
+        if (only_unselected && item->isSlotSelected()) {
+            continue;
+        }
+        std::vector<ColorDistValue> colorMap;
+        auto material_mapping = item->getMaterialMapping();
+        wxColour                    c(material_mapping.toolMaterialColor);
+        for (auto& v : slotColors) {
+            ColorDistValue val;
+            val.id = v.first;
+            bool match   = matlStationInfo.slotInfos[val.id].materialName &&
+                item->matchMaterialStr(matlStationInfo.slotInfos[val.id].materialName);
+            val.distance = match ? calc_color_distance(c, v.second) : INT_MAX - 1;
+            colorMap.push_back(val);
+        }
+        if (colorMap.empty()) {
+            continue;
+        }
+        sort(colorMap.begin(), colorMap.end(), [](ColorDistValue& a, ColorDistValue& b) {
+            return a.distance < b.distance;
+        });
+        if (colorMap[0].distance != INT_MAX - 1) {
+            item->setupSlot(comId, matlStationInfo.slotInfos[colorMap[0].id].slotId);
+        }
+    }
+}
+
 std::vector<std::string> SendToPrinterDialog::sort_string(std::vector<std::string> strArray)
 {
     std::vector<std::string> outputArray;
@@ -1526,6 +1647,13 @@ void SendToPrinterDialog::update_user_printer()
 {
     Freeze();
     clear_machine_list();
+    wxString selected_printer_model_id;
+    if (PresetBundle* preset_bundle = wxGetApp().preset_bundle) {
+        selected_printer_model_id = wxString::FromUTF8(
+            preset_bundle->printers
+            .get_edited_preset()
+            .get_printer_type(preset_bundle));
+        }
     m_selectAll->SetValue(false);
     int index = 1;
     int fixed_width = FromDIP(440);
@@ -1585,6 +1713,15 @@ void SendToPrinterDialog::update_user_printer()
         m_selectAll->Enable(visual_cnt > 0);
         index = 0;
     } else {
+            wxString nomachine_text = FFUtils::wrapString(
+                m_noMachineText,
+                wxString::Format(
+                    _L("No \"%s\" idle printer model. Please select the currently connected device model, then reslice and send the print."),
+                    selected_printer_model_id),
+                FromDIP(400));
+
+        m_noMachineText->SetLabel(nomachine_text);
+
         m_machineListWindow->SetSize(fixed_width, 1);
         m_machineListWindow->Layout();
         m_noMachinePanel->Fit();
@@ -1643,6 +1780,9 @@ void SendToPrinterDialog::on_dpi_changed(const wxRect &suggested_rect)
 
 void SendToPrinterDialog::set_default()
 {
+    BOOST_LOG_TRIVIAL(error) << "FF_CRASH_TRACE SendToPrinterDialog::set_default begin"
+                             << ", plate_idx=" << m_print_plate_idx
+                             << ", send_and_print=" << m_send_and_print;
     //project name
     m_need_redirect = false;
     m_is_in_sending_mode = false;
@@ -1657,6 +1797,8 @@ void SendToPrinterDialog::set_default()
     m_progressInfoLbl->SetForegroundColour(wxColour("#333333"));
 
     wxString filename = m_plater->get_export_gcode_filename("", true, m_print_plate_idx == PLATE_ALL_IDX ? true : false);
+    BOOST_LOG_TRIVIAL(error) << "FF_CRASH_TRACE SendToPrinterDialog::set_default filename"
+                             << ", filename=\"" << filename.ToUTF8().data() << "\"";
 
     if (m_print_plate_idx == PLATE_ALL_IDX && filename.empty()) {
         filename = _L("Untitled");
@@ -1668,7 +1810,7 @@ void SendToPrinterDialog::set_default()
     }
 
     fs::path filename_path(filename.c_str());
-    m_current_project_name = wxString::FromUTF8(filename_path.filename().string());
+    m_current_project_name = from_path(filename_path.filename());
 
     //unsupported character filter
     m_current_project_name = from_u8(filter_characters(m_current_project_name.ToUTF8().data(), "<>[]:/\\|?*\""));
@@ -1678,9 +1820,21 @@ void SendToPrinterDialog::set_default()
 
     enable_prepare_mode = true;
 
+    PresetBundle* presetBundle = wxGetApp().preset_bundle;
+    if (presetBundle == nullptr) {
+        return;
+    }
+    std::string    modelId = presetBundle->printers.get_edited_preset().get_printer_type(presetBundle);
+    unsigned short pid     = -1;
+    for (auto it : FFUtils::printer_preset_map) {
+        if (it.second.model_id == modelId) {
+            pid = it.first;
+            break;
+        }
+    }
     //levelling
     if (wxGetApp().app_config->get("levelling").empty()) {
-        m_levelChk->SetValue(false);
+        m_levelChk->SetValue(FFUtils::isNozzlesPrinter(pid));
     } else {
         m_levelChk->SetValue(wxGetApp().app_config->get("levelling") == "true");
     }
@@ -1728,8 +1882,7 @@ void SendToPrinterDialog::set_default()
     //init material match
     m_sizer_material->Clear(true);
     m_materialMapItems.clear();
-    std::vector<int> extruders = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders();
-    std::string modelId = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
+    std::vector<int> extruders = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_filaments();
     BitmapCache bmcache;
     for (auto i = 0; i < extruders.size(); ++i) {
         auto extruder_idx = extruders[i] - 1;
@@ -1819,16 +1972,25 @@ void SendToPrinterDialog::setup_print_config(bool isInit /* = false */)
         } else {
             m_amsTipLbl->SetLabelText(_L("IFS not enabled, unable to select the slot"));
         }
-        m_amsTipLbl->Show(isPrinterSupportAms);
         m_enableAmsChk->SetValue(isPrinterSupportAms);
-        m_enableAmsChk->Show(isPrinterSupportAms);
-        m_enableAmsLbl->Show(isPrinterSupportAms);
-        m_amsTipWxBmp->Show(isPrinterSupportAms);
+        if (FFUtils::isNozzlesPrinter(pid)) {
+            m_amsTipLbl->Hide();
+            m_enableAmsChk->Hide();
+            m_enableAmsLbl->Hide();
+            m_amsTipWxBmp->Hide();
+        } else {
+            m_amsTipLbl->Show(isPrinterSupportAms);
+            m_enableAmsChk->Show(isPrinterSupportAms);
+            m_enableAmsLbl->Show(isPrinterSupportAms);
+            m_amsTipWxBmp->Show(isPrinterSupportAms);
+        }
     }
     m_flowCalibrationChk->Show(isPrinterSupportLidar);
     m_flowCalibrationLbl->Show(isPrinterSupportLidar);
-    m_firstLayerInspectionChk->Show(isPrinterSupportLidar);
-    m_firstLayerInspectionLbl->Show(isPrinterSupportLidar);
+    /*m_firstLayerInspectionChk->Show(isPrinterSupportLidar);
+    m_firstLayerInspectionLbl->Show(isPrinterSupportLidar);*/
+    m_firstLayerInspectionChk->Hide();
+    m_firstLayerInspectionLbl->Hide();
     m_timeLapseVideoChk->Show(isPrinterSupportCamera);
     m_timeLapseVideoLbl->Show(isPrinterSupportCamera);
 
@@ -1836,14 +1998,18 @@ void SendToPrinterDialog::setup_print_config(bool isInit /* = false */)
         m_flowCalibrationChk->SetValue(false);
     } else {
         std::string value = wxGetApp().app_config->get("flowCalibration");
-        m_flowCalibrationChk->SetValue(value.empty() || value == "true");
+        if (FFUtils::isNozzlesPrinter(pid)) {
+            m_flowCalibrationChk->SetValue(value == "true");
+        } else {
+            m_flowCalibrationChk->SetValue(value.empty() || value == "true");
+        }
     }
-    if (!isPrinterSupportLidar) {
+    /*if (!isPrinterSupportLidar) {
         m_firstLayerInspectionChk->SetValue(false);
     } else {
         std::string value = wxGetApp().app_config->get("firstLayerInspection");
         m_firstLayerInspectionChk->SetValue(value.empty() || value == "true");
-    }
+    }*/
     if (!isPrinterSupportCamera || wxGetApp().app_config->get("timeLapseVideo").empty()) {
         m_timeLapseVideoChk->SetValue(false);
     } else {
@@ -1853,14 +2019,16 @@ void SendToPrinterDialog::setup_print_config(bool isInit /* = false */)
     std::vector<std::pair<FFCheckBox*, wxStaticText*>> configPairs;
     configPairs.emplace_back(m_levelChk, m_levelLbl);
     if (isPrinterSupportAms) {
-        configPairs.emplace_back(m_enableAmsChk, m_enableAmsLbl);
+        if (!FFUtils::isNozzlesPrinter(pid)) {
+            configPairs.emplace_back(m_enableAmsChk, m_enableAmsLbl);
+        }
     }
     if (isPrinterSupportLidar) {
         configPairs.emplace_back(m_flowCalibrationChk, m_flowCalibrationLbl);
     }
-    if (isPrinterSupportLidar) {
+    /*if (isPrinterSupportLidar) {
         configPairs.emplace_back(m_firstLayerInspectionChk, m_firstLayerInspectionLbl);
-    }
+    }*/
     if (isPrinterSupportCamera) {
         configPairs.emplace_back(m_timeLapseVideoChk, m_timeLapseVideoLbl);
     }
@@ -1878,6 +2046,7 @@ void SendToPrinterDialog::setup_print_config(bool isInit /* = false */)
     m_printConfigSizer->AddGrowableCol(0, 1);
     m_printConfigSizer->AddGrowableCol(1, 1);
     m_printConfigSizer->Layout();
+    apply_color_mode();
 }
 
 void SendToPrinterDialog::redirect_window()
@@ -1939,6 +2108,12 @@ void SendToPrinterDialog::update_machine_item_select_mode(bool isChecked)
 
 bool SendToPrinterDialog::Show(bool show)
 {
+    BOOST_LOG_TRIVIAL(error) << "FF_CRASH_TRACE SendToPrinterDialog::Show"
+                             << ", show=" << show
+                             << ", plate_idx=" << m_print_plate_idx
+                             << ", send_and_print=" << m_send_and_print
+                             << ", machine_items=" << m_machineItemList.size()
+                             << ", material_items=" << m_materialMapItems.size();
     if (show) {
         // set default value when show this dialog
         Bind(EVT_UPDATE_USER_MACHINE_LIST, &SendToPrinterDialog::update_printer_list, this);
@@ -1946,6 +2121,10 @@ bool SendToPrinterDialog::Show(bool show)
         wxGetApp().reset_to_active();
         set_default();
         update_user_machine_list();
+        set_first_machine_filaments();
+        updateMaterialMapWidgetsState();
+        updateSendButtonState();
+        apply_color_mode();
         Thaw();
         Layout();
         Fit();
@@ -2052,6 +2231,7 @@ void SendToPrinterDialog::onMachineRadioBoxClicked(wxCommandEvent& event)
             item->setComId(comId);
         }
     }
+    set_first_machine_filaments();
     if (!m_is_in_sending_mode) {
         setup_print_config();
         Layout();
@@ -2089,6 +2269,8 @@ void SendToPrinterDialog::onSendClicked(wxCommandEvent& event)
     sendGcodeData.firstLayerInspection = m_firstLayerInspectionChk->GetValue();
     sendGcodeData.timeLapseVideo = m_timeLapseVideoChk->GetValue();
     sendGcodeData.useMatlStation = m_enableAmsChk->GetValue();
+    sendGcodeData.unionId              = m_plater->model().uuid;
+    sendGcodeData.currentPlaterIndex   = m_plater->model().curr_plate_index;
     if (sendGcodeData.useMatlStation) {
         for (size_t i = 0; i < m_materialMapItems.size(); ++i) {
             sendGcodeData.materialMappings.push_back(m_materialMapItems[i]->getMaterialMapping());
@@ -2275,6 +2457,18 @@ void SendToPrinterDialog::onDevDetailUpdate(ComDevDetailUpdateEvent& event)
     const fnet_dev_detail_t *devDetail = MultiComMgr::inst()->devData(event.id, &valid).devDetail;
     if (!valid) {
         return;
+    }
+    bool is_selected_machine = false;
+    for (auto item : m_machineItemList) {
+        if (item->data().comId == event.id && item->IsChecked()) {
+            is_selected_machine = true;
+            break;
+        }
+    }
+    if (is_selected_machine && !m_is_in_sending_mode) {
+        set_first_machine_filaments(true);
+        updateMaterialMapWidgetsState();
+        updateSendButtonState();
     }
     auto infoIt = m_machineInfoMap.find(event.id);
     if (infoIt == m_machineInfoMap.end()

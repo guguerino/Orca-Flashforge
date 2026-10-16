@@ -5,6 +5,7 @@
 	margin: 0px;
     font-family: "system-ui", "Segoe UI", Roboto, Oxygen, Ubuntu, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-sans;
 	border-color: #D7D7D7;
+	user-select: none;
 }
 
 html, body {
@@ -16,58 +17,14 @@ html, body {
     font-size: 16px;	
 }
 
-body {
-	opacity: 0;
-	background: white !important;
-	transition: opacity 0.3s ease;
-}
-body.vue-ready {
-	opacity: 1;
-}
-body::after {
-	content: "";
-	position: fixed;
-	top: 50%;
-	left: 50%;
-	width: 30px;
-	height: 30px;
-	border: 3px solid #ddd;
-	border-top-color: #333;
-	border-radius: 50%;
-	animation: spin 1s linear infinite;
-	transform: translate(-50%, -50%);
-	z-index: 1000;
-}
-body.vue-ready::after {
-	display: none;
-}
-@keyframes spin {
-	to { transform: translate(-50%, -50%) rotate(360deg); }
-}
-/* Safari 优化 */
-@media screen and (-webkit-min-device-pixel-ratio: 0) {
-	body {
-	-webkit-backface-visibility: hidden;
-	-webkit-transform: translateZ(0);
-	}
-}
-.ZScrol {
-	overflow-y: hidden;
-	overflow-x: hidden;
-}
-
-.ZScrol:hover {
-	overflow-x: scroll;
-	overflow-y: auto;
-}
-
 .ZScrol::-webkit-scrollbar {/*滚动条整体样式*/
-    width: 0px;     /*高宽分别对应横竖滚动条的尺寸*/
-    height: 6px;
+    width: 12px;     /*高宽分别对应横竖滚动条的尺寸*/
+    height: 1px;
+	padding: 2px;
 }
 
 .ZScrol::-webkit-scrollbar-thumb {/*滚动条里面小方块*/
-    border-radius: 4px;
+    border-radius: 6px;
     -webkit-box-shadow: inset 0 0 5px rgba(0,0,0,0.2);
 	box-shadow: inset 0 0 5px rgba(0,0,0,0.2);
     background-color: #AAAAAA;
@@ -111,13 +68,10 @@ body
 	display:flex;
 	justify-content: flex-start;
 }
-.point_content {
-	display:flex;
-	justify-content: flex-start;
-}
 
 #LeftBoard
 {
+	display: none;  /* shown by cloud_providers_info from backend */
 	border-right-width: 1px;
 	border-right-style: solid;
 	width:262px;
@@ -126,49 +80,182 @@ body
 
 #LoginArea
 {
-	height: 180px;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	justify-content: center;
 	flex-wrap: nowrap;
 	position: relative;
 	width:262px;
 }
 
-
-#Login1
+.AccountSectionLabel
 {
-	height:36px;
-	line-height: 36px;
 	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--fg-color-text);
+	padding: 16px 20px 6px;
+	width: 262px;
+	box-sizing: border-box;
+}
+
+.AccountSectionIcon
+{
+	width: 18px;
+	height: 18px;
+	flex: 0 0 auto;
+}
+
+.AccountStatusText
+{
+	font-size: 12px;
+	color: #A8A8A8;
+	margin-top: 8px;
+}
+
+.OrcaAccountText
+{
+	font-weight: bold;
+}
+
+#OrcaLoginSection
+{
+	display: flex;
+	flex-direction: column;
+	align-items: center;
 	justify-content: center;
+	width: 100%;
+}
+
+#OrcaLogin1
+{
+	display: flex;
+	flex-direction: column;		/*ORCA*/
+	align-items: center;		/*Allow icon centered vertically*/
+	justify-content: center;	/*and use login button in new line*/
 	user-select: none;
+	padding: 10px 0;
 }
 
-#LoginBtn
+#OrcaLogin2
 {
-	cursor:pointer;
+	display: none;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	padding: 14px 0 16px;
+	box-sizing: border-box;
+	width: 262px;
 }
 
-#LoginBtn:hover
+/* --- Bambu Cloud Section --- */
+#BambuCloudSection
 {
-	font-size:17px;
+	display: none;  /* shown by cloud_providers_info from backend */
+	border-top: 1px solid;
+	width: 262px;
 }
 
+#BambuCloudHeader
+{
+	height: 40px;
+	display: flex;
+	align-items: center;
+	padding: 0 20px;
+	cursor: pointer;
+	font-size: 13px;
+	color: #A8A8A8;
+	gap: 8px;
+}
+
+#BambuCloudHeader:hover
+{
+	color: inherit;
+}
+
+.bambu-chevron
+{
+	width: 12px;
+	height: 12px;
+	transition: transform 0.2s ease;
+	transform: rotate(0deg);
+}
+
+.bambu-chevron.expanded
+{
+	transform: rotate(90deg);
+}
+
+.bambu-status-dot
+{
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background-color: #A8A8A8;
+	margin-left: auto;
+}
+
+.bambu-status-dot.online
+{
+	background-color: #4CAF50;
+}
+
+#BambuCloudBody
+{
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.25s ease;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+#BambuCloudBody.expanded
+{
+	max-height: 200px;
+}
 
 #NoPluginTip
 {
-	position: absolute;
-	top: 0px;
-	left: 0px;
-	bottom: 0px;
-	right: 0px;
-	z-index: 1;
+	position: static;
 	display: none;
 	flex-direction: column;
-	justify-content: flex-end;
-	padding: 5px;
+	padding: 5px 10px;
+	z-index: auto;
+}
+
+#BambuLogin1
+{
+	padding: 10px 0;
+}
+
+#BambuLogin2
+{
+	display: none;
+	flex-direction: column;
+	align-items: center;
+	text-align: center;
+	padding: 8px 0;
+	width: 262px;
+}
+
+#BambuAvatarIcon
+{
+	height: 40px;
+	border-radius: 50%;
+}
+
+#BambuUserName
+{
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	overflow: hidden;
+	width: 80%;
+	text-align: center;
+	font-size: 13px;
 }
 
 
@@ -185,23 +272,17 @@ body
 
 #BBLIcon
 {
-	height:36px;
-}
-
-#Login2
-{
-	display: none;
-	flex-direction: column;
-	align-items: center;
-	text-align: center;
-	width: 262px;
+	height:96px; /*ORCA use bigger icon to fit logo size*/
 }
 
 #UserAvatarIcon
 {
-	height: 85px;
-	width: 85px;
+	width: 64px;
+	height: 64px;
+	display: block;
+	margin: 2px auto 10px;
 	object-fit: cover;
+	border-radius: 50%;
 }
 
 #UserName
@@ -211,27 +292,14 @@ body
 	text-align: center;
 	overflow: hidden; 
 	width: 80%;
+	max-width: 190px;
+	line-height: 22px;
 }
 
 #LogoutBtn
 {
-	font-size: 14px;
-	height: 24px;
-	line-height: 24px;
-	color: #4db6ac;
-	border: 1px solid  #009688;
-	border-radius: 4px;
-	cursor: pointer;
-	margin-top: 5px;
-	padding: 0px 8px;
+	margin-top: 8px;
 }
-
-#LogoutBtn:hover
-{
-	background: #00f0d8;
-	color: #fff;
-}
-
 
 /*------------------*/
 #BtnArea
@@ -274,14 +342,46 @@ body
 	height: 20px;
 }
 
+.BtnShortcut
+{
+	padding-right: 18px;
+}
+
+.ShortcutBrandIcon
+{
+	width: 20px;
+	height: 20px;
+	border-radius: 5px;
+	display: block;
+}
+
+.ShortcutTextRow
+{
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-width: 0;
+}
+
+.ShortcutMark
+{
+	width: 14px;
+	height: 14px;
+	margin-left: auto;
+	color: currentColor;
+	opacity: 0.72;
+	flex: 0 0 auto;
+}
+
 
 /*--------------------*/
 #RightBoard
 {
 	width: 100%;
 	height: 100%;
-	/* min-width: 835px; */
-	overflow-y: auto;
+	min-width: 835px;
+	overflow-y:auto;
 }
 
 #ContentBoard
@@ -294,19 +394,6 @@ body
 	height: 100%;
 }
 
-.floating_window {
-	position: absolute;
-	right: 62px;
-	bottom: 175px;
-	width: 120px;
-	height: 110px;
-	cursor: pointer;
-}
-.floating_window img {
-	width: 100%;
-	height: 100%;
-}
-
 .TitleSmallIcon
 {
 	width:30px;
@@ -316,26 +403,10 @@ body
 
 #MenuArea
 {
-	/* height: 140px; */
+	height: 140px;
 	display: flex;
-	flex-wrap: wrap;
 	align-items: center;
 	flex: 0 0 140px;
-}
-
-@media (max-width: 1059px) {
-  #MenuArea { max-width: 791px; }
-  .model_hub .url_list { max-width: 791px; }
-}
-
-@media (max-width: 790px) {
-  #MenuArea { max-width: 522px; }
-  .model_hub .url_list { max-width: 522px; }
-}
-
-@media (max-width: 521px) {
-  #MenuArea { max-width: 253px; }
-  .model_hub .url_list { max-width: 253px; }
 }
 
 .MenuItem
@@ -350,7 +421,6 @@ body
 	justify-content: flex-start;
 	align-items: center;
 	margin-right: 16px;
-	margin-bottom: 16px;
 	cursor: pointer;
 }
 
@@ -424,6 +494,7 @@ body
 	flex: 1;
 	display: flex;
 	flex-direction: column;
+	min-height: 0;
 }
 
 #RecentTitleBlock
@@ -435,20 +506,8 @@ body
 
 #RecentClearAllBtn
 {
-	border-width: 1px;
-	border-style: solid;
-	padding: 0px 10px;
-	border-radius: 6px;
-	line-height: 26px;
-	height: 26px;
 	margin-left: 20px;
-	cursor: pointer;
 	display: none;
-}
-
-#RecentClearAllBtn:hover
-{
-	background-color:#CDCECE;
 }
 
 #RecentTitle
@@ -463,6 +522,7 @@ body
 	flex-wrap: wrap;
 	align-content: flex-start;
 	overflow-y: auto;
+	min-height: 0;
 }
 
 .FileItem
@@ -501,6 +561,7 @@ body
 	height: 184px;
 	border-radius: 8px;
 	display: inline-block;
+	object-fit: cover;
 }
 
 .FileName
@@ -653,42 +714,6 @@ body
 	left: 0px;
 }
 
-.model_hub {
-	margin-top: 10px;
-}
-
-.model_hub #RecentTitle {
-	margin-bottom: 16px;
-}
-
-.model_hub .url_list {
-	display: flex;
-	flex-wrap: wrap;
-}
-.model_hub .url_list .url_list_item {
-	width: 275px;
-	min-width: 176px;
-	height: 103px;
-	margin-right: 16px;
-	margin-bottom: 16px;
-	display: flex;
-	justify-content: center;
-	align-items: center;
-	border-radius: 12px;
-	border-width: 1px;
-    border-style: solid;
-	cursor: pointer;
-}
-.url_list_item:hover
-{
-	border-color: #009688;
-	background-color: #e5f0ee;
-}
-.model_hub .url_list .url_list_item img {
-	width: 162px;
-	height: 29px;
-}
-
 
 @media screen and (max-width: 1100px) {
 .GuideBlock
@@ -815,7 +840,7 @@ body
 #HotModel_RIGHT_Title:hover
 {
 	cursor: pointer;	
-	color:#00AE42;	
+	color:#009688;	
 }
 
 .HotModelPiece
@@ -885,236 +910,4 @@ body
 	opacity: 1!important;
 	cursor: pointer!important;
 	pointer-events: auto!important;
-}
-
-#my_point {
-	padding: 0 35px;
-	font-family: "Alibaba PuHuiTi";
-	overflow-y:auto;
-	display: flex;
-	flex-direction: column;
-	position: relative;
-	height: 100%;
-	background-color: #f0f0f0;
-	width: 1112px;
-}
-
-.model_title {
-	color: #333;
-	font-size: 16px;
-	font-weight: 400;
-	margin-bottom: 12px;
-	margin-top: 16px;
-}
-.benefits_content {
-	display: flex;
-	align-items: center;
-}
-.total_point {
-	width: 190px;
-	height: 216px;
-	background-image: url('../img/bg_total_point.png');
-	background-repeat: no-repeat;
-	background-position: center;
-	background-size: cover;
-	text-align: center;
-	margin-right: 20px;
-	flex-shrink: 0;
-}
-.total_point_info {
-	margin: 32px auto;
-	font-size: 16px;
-	font-weight: 400;
-	color: #333;
-	flex-shrink: 0;
-}
-.total_point_num {
-	margin-top: 12px;
-	font-size: 28px;
-	font-weight: 600;
-	height: 38px;
-	line-height: 1;
-	color: #328dfb;
-}
-.benefits_card_list {
-	display: flex;
-	flex-wrap: wrap;
-	height: 225px;
-	overflow-y: hidden;
-	gap: 15px;
-}
-.benefits_card_list:hover {
-	overflow-y: scroll;
-}
-.benefits_card_list::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.benefits_card_list::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.05); /* 滚动条轨道背景（半透明） */
-  border-radius: 3px; /* 圆角 */
-}
-
-.benefits_card_list::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2); /* 滚动条滑块颜色 */
-  border-radius: 3px; /* 圆角 */
-}
-
-.benefits_card_list::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.3); /* 鼠标悬停时的颜色 */
-}
-
-.benefits_card_list_item {
-	width: 176px;
-	height: 105px;
-	border-radius: 4px;
-	padding: 13px;
-	display: flex;
-	flex-direction: column;
-	justify-content: space-between;
-	border-radius: 8px;
-	overflow: hidden;
-	box-sizing: border-box;
-	flex-shrink: 0;
-}
-
-.benefits_card_list_item_name {
-	font-size: 12px;
-	color: #000;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	display: -webkit-box;
-	-webkit-line-clamp: 3;
-	-webkit-box-orient: vertical;
-	max-width: 180px;
-	
-}
-
-.empty_page {
-	display: flex;
-	justify-content: center;
-	align-items: center;
-	height: 100%;
-}
-.empty_info {
-	display: flex;
-	flex-direction: column;
-}
-.empty_img {
-	width: 160px;
-	height: 150px;
-}
-.empty_desc {
-	font-size: 16px;
-	color: #333;
-	margin-top: 20px;
-	padding-left: 66px;
-}
-.empty_btn {
-	border: 1px solid #419488;
-	color: #419488;
-	border-radius: 8px;
-	width: 86px;
-	height: 30px;
-	display: flex;
-	justify-content: center;
-	align-items: center;
-	margin-top: 16px;
-	font-size: 16px;
-	margin-left: 62px;
-	cursor: pointer;
-}
-
-.table_header {
-	display: flex;
-	justify-content: space-between;
-}
-.table_operation_btn {
-	display: flex;
-	align-items: center;
-	margin-top: 4px;
-}
-.table_operation_btn_item {
-}
-.table_header_total_point_info {
-	display: flex;
-	align-items: center;
-	font-size: 14px;
-	color: #000;
-}
-.table_header_total_point_info .total_income {
-	display: flex;
-	align-items: center;
-	margin-right: 30px;
-}
-.table_header_total_point_info .total_income .total_income_num {
-	color: #328DFB;
-	margin-left: 10px;
-}
-.table_header_total_point_info .total_expenditure .total_income_num {
-	color: #328DFB;
-	margin-left: 10px;
-}
-.el-button {
-	border-radius: 16px;
-}
-
-.channel_block {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 15px;
-	height: 235px;
-	overflow-y: hidden;
-}
-.channel_block:hover {
-	overflow-y: scroll;
-}
-.channel_block::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.channel_block::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.05); /* 滚动条轨道背景（半透明） */
-  border-radius: 3px; /* 圆角 */
-}
-
-.channel_block::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2); /* 滚动条滑块颜色 */
-  border-radius: 3px; /* 圆角 */
-}
-
-.channel_block::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.3); /* 鼠标悬停时的颜色 */
-}
-.channel_item {
-	width: 372px;
-	height: 110px;
-	border-radius: 8px;
-	background-color: #fff;
-	padding: 15px 10px;
-	flex-shrink: 0;
-	display: flex;
-	flex-direction: column;
-	justify-content: space-between;
-	box-sizing: border-box;
-	cursor: pointer;
-}
-.channel_item_header {
-	display: flex;
-	justify-content: space-between;
-}
-.channel_item_header_name {
-	font-size: 14px;
-	color: #333;
-	max-width: 206px;
-	white-space: nowrop;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-.channel_item_footer {
-	display: flex;
-	align-items: center;
-	font-size: 12px;
-	color: #999;
 }

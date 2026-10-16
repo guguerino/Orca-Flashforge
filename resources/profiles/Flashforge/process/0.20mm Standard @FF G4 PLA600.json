@@ -4,6 +4,7 @@
     "enable_support": "0",
     "filter_out_gap_fill": "0.1",
     "from": "system",
+    "setting_id": "vJMNZ7ccBUuLYsPG",
     "instantiation": "true",
     "compatible_printers": [
     "Flashforge Guider4 0.4 HF nozzle"
@@ -39,5 +40,21 @@
     "top_surface_speed": "300",
     "travel_acceleration": "30000",
     "travel_speed": "600",
-    "version": "2.1.1.0"
+
+    "enable_tower_interface_features": "1",
+    "ooze_prevention": "0",
+    "prime_tower_brim_width": "-1",
+    "prime_tower_infill_gap": "165%",
+    "prime_tower_skip_points": "0",
+    "prime_tower_width": "35",
+    "prime_volume": "40",
+    "print_extruder_id": [
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard"
+    ],
+    "version": "2.1.1.0",
+    "wipe_tower_wall_type": "rib"
+
 }

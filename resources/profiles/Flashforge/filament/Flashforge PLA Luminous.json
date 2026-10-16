@@ -2,11 +2,14 @@
     "filament_settings_id": [
         "Flashforge PLA Luminous"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "inherits": "Flashforge Generic PLA",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Luminous",
+    "setting_id": "s620OFLTgFT4Ds2A",
     "version": "2.1.1.0"
 }

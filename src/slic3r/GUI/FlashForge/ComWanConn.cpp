@@ -2,11 +2,13 @@
 #include "FreeInDestructor.h"
 #include "MultiComUtils.hpp"
 #include "WanDevTokenMgr.hpp"
+#include <wx/thread.h>
 
 namespace Slic3r { namespace GUI {
 
 wxDEFINE_EVENT(WAN_CONN_STATUS_EVENT, WanConnStatusEvent);
 wxDEFINE_EVENT(WAN_CONN_READ_EVENT, WanConnReadEvent);
+wxDEFINE_EVENT(WAN_CONN_HTTP_UNAUTHORIZED, WanConnUnauthorizedEvent);
 
 ComWanConn::ComWanConn()
     : m_networkIntfc(nullptr)
@@ -15,54 +17,67 @@ ComWanConn::ComWanConn()
 {
 }
 
-ComErrno ComWanConn::createConn(fnet::FlashNetworkIntfc *networkIntfc, const char *clientId)
+ComErrno ComWanConn::createConn(fnet::FlashNetworkIntfc *networkIntfc, const char *clientId,
+    uint64_t sessionGeneration, uint64_t connectionGeneration)
 {
     boost::unique_lock<boost::shared_mutex> lock(m_connMutex);
     if (m_conn != nullptr) {
         return COM_ERROR;
     }
+    std::unique_ptr<ConnectionCallbackContext> callbackContext(new ConnectionCallbackContext {
+        this, sessionGeneration, connectionGeneration });
+    m_networkIntfc = networkIntfc;
+    m_clientId = clientId;
     void *conn;
     fnet_conn_settings_t settings;
     settings.clientId = clientId;
     settings.statusCallback = statusCallback;
-    settings.statusCallbackData = this;
+    settings.statusCallbackData = callbackContext.get();
     settings.updateCallback = updateCallback;
-    settings.updateCallbackData = this;
+    settings.updateCallbackData = callbackContext.get();
     settings.readCallback = readCallback;
-    settings.readCallbackData = this;
+    settings.readCallbackData = callbackContext.get();
     ComErrno ret = MultiComUtils::fnetRet2ComErrno(networkIntfc->createConnection(&conn, &settings));
     if (ret != COM_OK) {
         return ret;
     }
-    m_networkIntfc = networkIntfc;
-    m_clientId = clientId;
     m_conn = conn;
+    m_callbackContext = std::move(callbackContext);
     m_threadExitEvent.set(false);
     return COM_OK;
 }
 
-void ComWanConn::freeConn()
+void ComWanConn::freeConnBlocking()
 {
+    wxASSERT_MSG(!wxIsMainThread(), "ComWanConn::freeConnBlocking must not run on the wx event thread");
+    // Reject newly posted commands before stopping the native connection. A
+    // task that is already inside FlashNetwork is interrupted by
+    // connectionStop() below.
+    m_threadExitEvent.set(true);
     boost::shared_lock<boost::shared_mutex> sharedLock(m_connMutex);
     if (m_conn == nullptr) {
         return;
     }
-    m_networkIntfc->connectionStop(m_conn);
-    m_threadExitEvent.set(true);
+    BOOST_LOG_TRIVIAL(info) << "ComWanConn::freeConnBlocking begin";
     m_threadPool.clear();
+    m_networkIntfc->connectionStop(m_conn);
+    BOOST_LOG_TRIVIAL(info) << "ComWanConn::freeConnBlocking connectionStop finished";
     m_threadPool.wait();
+    BOOST_LOG_TRIVIAL(info) << "ComWanConn::freeConnBlocking WAN tasks finished";
     sharedLock.unlock();
 
     boost::unique_lock<boost::shared_mutex> uniqueLock(m_connMutex);
     m_networkIntfc->freeConnection(m_conn);
     m_conn = nullptr;
+    m_callbackContext.reset();
+    BOOST_LOG_TRIVIAL(info) << "ComWanConn::freeConnBlocking finished";
 }
 
 void ComWanConn::syncLogin(const std::string &topic)
 {
     m_threadPool.post([this, topic]() {
         boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-        if (m_conn == nullptr) {
+        if (m_conn == nullptr || m_threadExitEvent.get()) {
             return;
         }
         fnet_conn_write_data_t writeData;
@@ -80,7 +95,7 @@ void ComWanConn::updateDetail(const std::vector<std::string> &topics)
 {
     m_threadPool.post([this, topics]() {
         boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-        if (m_conn == nullptr) {
+        if (m_conn == nullptr || m_threadExitEvent.get()) {
             return;
         }
         const void *dataPtr = nullptr;
@@ -107,7 +122,7 @@ void ComWanConn::subscribe(const std::vector<std::string> &topics)
 {
     m_threadPool.post([this, topics]() {
         boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-        if (m_conn == nullptr || topics.empty()) {
+        if (m_conn == nullptr || m_threadExitEvent.get() || topics.empty()) {
             return;
         }
         std::vector<const char *> topicPtrs(topics.size());
@@ -130,7 +145,7 @@ void ComWanConn::unsubscribe(const std::vector<std::string> &topics)
 {
     m_threadPool.post([this, topics]() {
         boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-        if (m_conn == nullptr) {
+        if (m_conn == nullptr || m_threadExitEvent.get()) {
             return;
         }
         std::vector<const char *> topicPtrs(topics.size());
@@ -152,7 +167,7 @@ void ComWanConn::unsubscribe(const std::vector<std::string> &topics)
 ComErrno ComWanConn::sendStartJob(const char *topic, const fnet_local_job_data_t &jobData)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_START_JOB, &jobData, topic, 1 };
@@ -163,7 +178,7 @@ ComErrno ComWanConn::sendStartCloundJob(const std::vector<std::string> &topics,
     const fnet_clound_job_data_t &jobData, std::set<int> &failedIndices)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     std::vector<fnet_clound_job_data_t> jobDatas(topics.size(), jobData);
@@ -198,7 +213,7 @@ ComErrno ComWanConn::sendStartCloundJob(const std::vector<std::string> &topics,
 ComErrno ComWanConn::sendTempCtrl(const char *topic, const fnet_temp_ctrl_t &tempCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_TEMP_CTRL, &tempCtrl, topic, 1 };
@@ -208,7 +223,7 @@ ComErrno ComWanConn::sendTempCtrl(const char *topic, const fnet_temp_ctrl_t &tem
 ComErrno ComWanConn::sendLightCtrl(const char *topic, const fnet_light_ctrl_t &lightCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_LIGHT_CTRL, &lightCtrl, topic, 1 };
@@ -218,7 +233,7 @@ ComErrno ComWanConn::sendLightCtrl(const char *topic, const fnet_light_ctrl_t &l
 ComErrno ComWanConn::sendAirFilterCtrl(const char *topic, const fnet_air_filter_ctrl_t &airFilterCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_AIR_FILTER_CTRL, &airFilterCtrl, topic, 1 };
@@ -228,7 +243,7 @@ ComErrno ComWanConn::sendAirFilterCtrl(const char *topic, const fnet_air_filter_
 ComErrno ComWanConn::sendClearFanCtrl(const char *topic, const fnet_clear_fan_ctrl_t &clearFanCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_CLEAR_FAN_CTRL, &clearFanCtrl, topic, 1 };
@@ -238,7 +253,7 @@ ComErrno ComWanConn::sendClearFanCtrl(const char *topic, const fnet_clear_fan_ct
 ComErrno ComWanConn::sendMoveCtrl(const char *topic, const fnet_move_ctrl_t &moveCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_MOVE_CTRL, &moveCtrl, topic, 1 };
@@ -248,7 +263,7 @@ ComErrno ComWanConn::sendMoveCtrl(const char *topic, const fnet_move_ctrl_t &mov
 ComErrno ComWanConn::sendExtrudeCtrl(const char *topic, const fnet_extrude_ctrl_t &extrudeCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_EXTRUDE_CTRL, &extrudeCtrl, topic, 1 };
@@ -258,7 +273,7 @@ ComErrno ComWanConn::sendExtrudeCtrl(const char *topic, const fnet_extrude_ctrl_
 ComErrno ComWanConn::sendHomingCtrl(const char *topic)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_HOMING_CTRL, nullptr, topic, 1 };
@@ -268,7 +283,7 @@ ComErrno ComWanConn::sendHomingCtrl(const char *topic)
 ComErrno ComWanConn::sendMatlStationCtrl(const char *topic, const fnet_matl_station_ctrl_t &matlStationCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_MATL_STATION_CTRL, &matlStationCtrl, topic, 1 };
@@ -278,7 +293,7 @@ ComErrno ComWanConn::sendMatlStationCtrl(const char *topic, const fnet_matl_stat
 ComErrno ComWanConn::sendIndepMatlCtrl(const char *topic, const fnet_indep_matl_ctrl_t &indepMatlCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_INDEP_MATL_CTRL, &indepMatlCtrl, topic, 1 };
@@ -288,7 +303,7 @@ ComErrno ComWanConn::sendIndepMatlCtrl(const char *topic, const fnet_indep_matl_
 ComErrno ComWanConn::sendPrintCtrl(const char *topic, const fnet_print_ctrl_t &printCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_PRINT_CTRL, &printCtrl, topic, 1 };
@@ -298,7 +313,7 @@ ComErrno ComWanConn::sendPrintCtrl(const char *topic, const fnet_print_ctrl_t &p
 ComErrno ComWanConn::sendJobCtrl(const char *topic, const fnet_job_ctrl_t &jobCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_JOB_CTRL, &jobCtrl, topic, 1 };
@@ -308,7 +323,7 @@ ComErrno ComWanConn::sendJobCtrl(const char *topic, const fnet_job_ctrl_t &jobCt
 ComErrno ComWanConn::sendStateCtrl(const char *topic, const fnet_state_ctrl_t &stateCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_STATE_CTRL, &stateCtrl, topic, 1 };
@@ -318,7 +333,7 @@ ComErrno ComWanConn::sendStateCtrl(const char *topic, const fnet_state_ctrl_t &s
 ComErrno ComWanConn::sendErrorCodeCtrl(const char *topic, const fnet_error_code_ctrl_t &errorCodeCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_ERROR_CODE_CTRL, &errorCodeCtrl, topic, 1 };
@@ -328,7 +343,7 @@ ComErrno ComWanConn::sendErrorCodeCtrl(const char *topic, const fnet_error_code_
 ComErrno ComWanConn::sendPlateDetectCtrl(const char *topic, const fnet_plate_detect_ctrl &plateDetectCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_PLATE_DETECT_CTRL, &plateDetectCtrl, topic, 1 };
@@ -339,7 +354,7 @@ ComErrno ComWanConn::sendFirstLayerDetectCtrl(const char *topic,
     const fnet_first_layer_detect_ctrl_t &firstLayerDetectCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_FIRST_LAYER_DETECT_CTRL, &firstLayerDetectCtrl, topic, 1 };
@@ -349,7 +364,7 @@ ComErrno ComWanConn::sendFirstLayerDetectCtrl(const char *topic,
 ComErrno ComWanConn::sendCameraStreamCtrl(const char *topic, const fnet_camera_stream_ctrl_t &cameraStreamCtrl)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_CAMERA_STREAM_CTRL, &cameraStreamCtrl, topic, 1 };
@@ -359,7 +374,7 @@ ComErrno ComWanConn::sendCameraStreamCtrl(const char *topic, const fnet_camera_s
 ComErrno ComWanConn::sendMatlStationConfig(const char *topic, const fnet_matl_station_config_t &matlStationConfig)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_MATL_STATION_CONFIG, &matlStationConfig, topic, 1 };
@@ -369,7 +384,7 @@ ComErrno ComWanConn::sendMatlStationConfig(const char *topic, const fnet_matl_st
 ComErrno ComWanConn::sendIndepMatlConfig(const char *topic, const fnet_indep_matl_config_t &indepMatlConfig)
 {
     boost::shared_lock<boost::shared_mutex> lock(m_connMutex);
-    if (m_conn == nullptr) {
+    if (m_conn == nullptr || m_threadExitEvent.get()) {
         return COM_ERROR;
     }
     fnet_conn_write_data_t writeData = { FNET_CONN_WRITE_INDEP_MATL_CONFIG, &indepMatlConfig, topic, 1 };
@@ -378,22 +393,34 @@ ComErrno ComWanConn::sendIndepMatlConfig(const char *topic, const fnet_indep_mat
 
 void ComWanConn::statusCallback(fnet_conn_status_t status, void *data)
 {
+    ConnectionCallbackContext *context = static_cast<ConnectionCallbackContext *>(data);
     WanConnStatusEvent *event = new WanConnStatusEvent;
     event->SetEventType(WAN_CONN_STATUS_EVENT);
     event->status = status;
-    ((ComWanConn *)data)->QueueEvent(event);
+    event->sessionGeneration = context->sessionGeneration;
+    event->connectionGeneration = context->connectionGeneration;
+    context->owner->QueueEvent(event);
 }
 
 int ComWanConn::updateCallback(const char **clientId, void *data)
 {
-    ComWanConn *self = (ComWanConn *)data;
+    ConnectionCallbackContext *context = static_cast<ConnectionCallbackContext *>(data);
+    ComWanConn *self = context->owner;
     ScopedWanDevToken token = WanDevTokenMgr::inst()->getScopedToken();
     com_mqtt_config_t mqttConfig;
-    if (MultiComUtils::getMqttConfig(self->m_clientId, token.accessToken(), mqttConfig, ComTimeoutWanB) != COM_OK) {
+    ComErrno ret = MultiComUtils::getMqttConfig(self->m_clientId, token.accessToken(), mqttConfig, ComTimeoutWanB);
+    if (ret == COM_UNAUTHORIZED) {
+        WanConnUnauthorizedEvent *event = new WanConnUnauthorizedEvent;
+        event->SetEventType(WAN_CONN_HTTP_UNAUTHORIZED);
+        event->sessionGeneration = context->sessionGeneration;
+        event->connectionGeneration = context->connectionGeneration;
+        self->QueueEvent(event);
+        return 1;
+    } else if (ret != COM_OK) {
         return 1;
     }
     *clientId = self->m_networkIntfc->allocString(self->m_clientId.c_str(), self->m_clientId.size());
-    if (clientId == nullptr) {
+    if (*clientId == nullptr) {
         return 1;
     }
     return 0;
@@ -401,10 +428,13 @@ int ComWanConn::updateCallback(const char **clientId, void *data)
 
 void ComWanConn::readCallback(fnet_conn_read_data_t *readData, void *data)
 {
+    ConnectionCallbackContext *context = static_cast<ConnectionCallbackContext *>(data);
     WanConnReadEvent *event = new WanConnReadEvent;
     event->SetEventType(WAN_CONN_READ_EVENT);
     event->readData = *readData;
-    ((ComWanConn *)data)->QueueEvent(event);
+    event->sessionGeneration = context->sessionGeneration;
+    event->connectionGeneration = context->connectionGeneration;
+    context->owner->QueueEvent(event);
 }
 
 }} // namespace Slic3r::GUI

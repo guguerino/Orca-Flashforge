@@ -1,4 +1,9 @@
 {
+    "compatible_printers": [
+        "Flashforge Adventurer A5 0.4 nozzle",
+        "Flashforge Adventurer A5 0.6 nozzle",
+        "Flashforge Adventurer A5 0.8 nozzle"
+    ],
     "cool_plate_temp": [
         "0"
     ],
@@ -17,14 +22,13 @@
     "filament_settings_id": [
         "Flashforge PETG-CF @FF Adventurer A5"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge Adventurer A5 0.4 nozzle",
-      "Flashforge Adventurer A5 0.6 nozzle",
-      "Flashforge Adventurer A5 0.8 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "inherits": "Flashforge Generic PETG-CF10",
+    "setting_id": "aDSOS4PWssYHk8Fh",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PETG-CF @FF Adventurer A5",
     "supertack_plate_temp": [

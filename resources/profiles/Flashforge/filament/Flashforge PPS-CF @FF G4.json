@@ -5,6 +5,9 @@
     "close_fan_the_first_x_layers": [
         "3"
     ],
+    "compatible_printers": [
+        "Flashforge Guider4 0.4 nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "50"
     ],
@@ -50,11 +53,10 @@
     "filament_type": [
         "PPS-CF"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge Guider4 0.4 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "hot_plate_temp": [
         "100"
     ],
@@ -62,6 +64,8 @@
         "100"
     ],
     "inherits": "Flashforge Generic PLA-CF10",
+    "setting_id": "oSGlx5mtGh07BnOz",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PPS-CF @FF G4",
     "nozzle_temperature": [

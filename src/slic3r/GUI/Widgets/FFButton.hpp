@@ -3,6 +3,7 @@
 
 #include <wx/window.h>
 #include <wx/button.h>
+#include <slic3r/GUI/wxExtensions.hpp>
 
 class FFButton : public wxWindow
 {
@@ -20,6 +21,7 @@ public:
 	void SetFontPressColor(const wxColour& color);
 	void SetFontDisableColor(const wxColour& color);
 	void SetFontUniformColor(const wxColour& color);
+	void SetUniformColors(const wxColour& fontColor, const wxColour& borderColor, const wxColour& bgColor);
 	void SetBorderColor(const wxColour& color);
 	void SetBorderHoverColor(const wxColour& color);
 	void SetBorderPressColor(const wxColour& color);
@@ -31,10 +33,16 @@ public:
 	void SetBGPressColor(const wxColour& color);
 	void SetBGDisableColor(const wxColour& color);
 	void SetBGUniformColor(const wxColour& color);
+    void SetIcon(const ScalableBitmap& bmp);
+    void SetHoverIcon(const ScalableBitmap& bmp);
+    void SetPressIcon(const ScalableBitmap& bmp);
+    void SetDisableIcon(const ScalableBitmap& bmp);
+    void SetUniformIcon(const ScalableBitmap& bmp);
+    void SetIconSpacing(int spacing);
 
 protected:
 	void OnPaint(wxPaintEvent& event);	
-    void render(wxPaintDC &dc);
+    void render(wxDC &dc);
 
 private:
 	void updateState();
@@ -47,6 +55,11 @@ protected:
     bool        m_enable;
 	int			m_borderRadius;
 	int			m_borderWidth;
+    int               m_iconSpacing;
+    ScalableBitmap    m_bitmap;
+    ScalableBitmap	  m_hoverBitmap;
+    ScalableBitmap    m_pressBitmap;
+    ScalableBitmap    m_disableBitmap;
 	wxColour	m_fontColor;
 	wxColour	m_fontHoverColor;
 	wxColour	m_fontPressColor;
@@ -62,7 +75,7 @@ protected:
 	wxString	m_text;
 };
 
-class FFPushButton : public wxButton
+class FFPushButton : public wxWindow
 {
 public:
     FFPushButton(wxWindow *parent, wxWindowID id = wxID_ANY, const wxString &normalIcon = "",const wxString &hoverIcon = "",const wxString &pressIcon = "",const wxString &disableIcon = "",const int iconSize = 16);
@@ -79,6 +92,9 @@ public:
     {
         m_isPressed = false;
         Refresh();
+        wxCommandEvent evt(wxEVT_BUTTON, GetId());
+        evt.SetEventObject(this);
+        ProcessWindowEvent(evt);
 		event.Skip();
     }
 

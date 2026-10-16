@@ -2,17 +2,27 @@
 
 #include "../wxExtensions.hpp"
 
-namespace Slic3r { 
+namespace Slic3r {
 namespace GUI {
 RadioBox::RadioBox(wxWindow *parent)
-    : wxBitmapToggleButton(parent, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE), m_on(this, "radio_on", 18), m_off(this, "radio_off", 18)
+    : wxBitmapToggleButton(parent, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE)
+    , m_on(this, "radio_on", 18)
+    , m_off(this, "radio_off", 18)
+    , m_ban(this, "radio_ban", 18)
 {
     // SetBackgroundStyle(wxBG_STYLE_TRANSPARENT);
     if (parent) SetBackgroundColour(parent->GetBackgroundColour());
     // Bind(wxEVT_TOGGLEBUTTON, [this](auto& e) { update(); e.Skip(); });
+    update();
+#ifdef __WXGTK__
+    wxSize bestSize = GetBestSize();
+    bestSize.IncTo(m_on.GetBmpSize());
+    SetSize(bestSize);
+    SetMinSize(bestSize);
+#else
     SetSize(m_on.GetBmpSize());
     SetMinSize(m_on.GetBmpSize());
-    update();
+#endif
 }
 
 void RadioBox::SetValue(bool value)
@@ -31,11 +41,28 @@ void RadioBox::Rescale()
 {
     m_on.msw_rescale();
     m_off.msw_rescale();
-    SetSize(m_on.GetBmpSize());
     update();
+#ifdef __WXGTK__
+    wxSize bestSize = GetBestSize();
+    bestSize.IncTo(m_on.GetBmpSize());
+    SetSize(bestSize);
+    SetMinSize(bestSize);
+#else
+    SetSize(m_on.GetBmpSize());
+    SetMinSize(m_on.GetBmpSize());
+#endif
 }
 
-void RadioBox::update() { SetBitmap((GetValue() ? m_on : m_off).bmp()); }
+void RadioBox::update() {
+    if (IsEnabled())
+    {
+        SetBitmap((GetValue() ? m_on : m_off).bmp());
+    } else
+    {
+        SetBitmap(m_ban.bmp());
+    }
+
+}
 
 
 
@@ -48,6 +75,16 @@ RadioButton::RadioButton(wxWindow* parent)
     , m_off_hover(this, "radio_false_hover", 16)
 {
     connectEvent();
+#ifdef __WXGTK__
+    // GTK backs wxBitmapToggleButton with a native GtkButton that does not
+    // fire wxEVT_PAINT for owner-drawing, so paintEvent() never runs and the
+    // widget renders blank. Push bitmaps through SetBitmap*() so GTK renders
+    // them, and re-apply on toggle / hover changes.
+    SetSize(m_off_normal.GetBmpSize());
+    SetMinSize(m_off_normal.GetBmpSize());
+    update();
+    Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update(); e.Skip(); });
+#endif
     Refresh();
 }
 
@@ -56,8 +93,25 @@ RadioButton::~RadioButton() {}
 void RadioButton::SetValue(bool value)
 {
     wxBitmapToggleButton::SetValue(value);
+#ifdef __WXGTK__
+    update();
+#endif
     Refresh();
 }
+
+#ifdef __WXGTK__
+void RadioButton::update()
+{
+    const ScalableBitmap &bmp = GetValue()
+        ? (m_mode == PaintMode::Hover ? m_on_hover : m_on_normal)
+        : (m_mode == PaintMode::Hover ? m_off_hover : m_off_normal);
+    SetBitmap(bmp.bmp());
+    SetBitmapLabel(bmp.bmp());
+    SetBitmapPressed(bmp.bmp());
+    SetBitmapCurrent(bmp.bmp());
+    SetBitmapDisabled(bmp.bmp());
+}
+#endif
 
 bool RadioButton::GetValue()
 {
@@ -92,12 +146,18 @@ void RadioButton::paintEvent(wxPaintEvent& event)
 void RadioButton::OnMouseEnter(wxMouseEvent& event)
 {
     m_mode = PaintMode::Hover;
+#ifdef __WXGTK__
+    update();
+#endif
     Refresh();
 }
 
 void RadioButton::OnMouseLeave(wxMouseEvent& event)
 {
     m_mode = PaintMode::Normal;
+#ifdef __WXGTK__
+    update();
+#endif
     Refresh();
 }
 

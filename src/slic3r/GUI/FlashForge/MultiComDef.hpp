@@ -1,6 +1,7 @@
 #ifndef slic3r_GUI_MultiComDef_hpp_
 #define slic3r_GUI_MultiComDef_hpp_
 
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <string>
@@ -37,9 +38,56 @@ enum ComErrno {
     COM_CONN_SEND_ERROR,
 };
 
+// Identifies which post-authentication step failed while restoring a cloud
+// session. Obtaining a token is authentication; these stages initialize the
+// account-backed cloud session and must not be reported as bad credentials.
+enum class ComSessionInitStage {
+    None,
+    NetworkInterface,
+    ExistingSession,
+    UserProfile,
+    AccountBinding,
+};
+
 enum ComConnectMode {
     COM_CONNECT_LAN,
     COM_CONNECT_WAN,
+};
+
+enum class WanDevicePresence {
+    Unknown,
+    Online,
+    Offline,
+};
+
+enum class WanServiceState {
+    Unknown,
+    Connected,
+    Reconnecting,
+    ApiUnavailable,
+    LoggedOut,
+};
+
+// Describes why an authenticated WAN session ended. Views use this only to
+// select the appropriate message; MultiComMgr remains the session owner.
+enum class WanLogoutReason {
+    Unknown,
+    UserRequested,
+    RepeatedLogin,
+    RefreshTokenRejected,
+    UserUnregistered,
+    ServerForcedLogout,
+};
+
+enum class WanDeviceStatusSource {
+    Initial,
+    HttpDeviceList,
+    SyncOnline,
+    SyncOffline,
+    DeviceDetail,
+    KeepAlive,
+    MessageActivity,
+    StaleTimeout,
 };
 
 enum ComCloundJobErrno {
@@ -82,7 +130,7 @@ struct com_wan_dev_info_t {
     std::string name;
     std::string model;
     std::string imageUrl;
-    std::string status;
+    std::string status; // Operational state only: ready, printing, error, etc.
     std::string location;
     std::string serialNumber;
     std::string devTopic;
@@ -109,7 +157,28 @@ struct com_dev_data_t {
     com_gcode_list_t wanGcodeList;
     com_time_lapse_video_list_t wanTimeLapseVideoList;
     bool devDetailUpdated;
+    WanDevicePresence wanPresence { WanDevicePresence::Unknown };
+    WanDeviceStatusSource wanStatusSource { WanDeviceStatusSource::Initial };
+    std::chrono::steady_clock::time_point wanLastMessageTime {};
+    std::chrono::steady_clock::time_point wanLastDetailTime {};
+    std::chrono::steady_clock::time_point wanLastStateChangeTime {};
+    std::chrono::steady_clock::time_point wanLastDetailRefreshTime {};
 };
+
+inline bool is_wan_device_online(const com_dev_data_t &data)
+{
+    return data.connectMode == COM_CONNECT_WAN && data.wanPresence == WanDevicePresence::Online;
+}
+
+inline bool is_wan_device_offline(const com_dev_data_t &data)
+{
+    return data.connectMode == COM_CONNECT_WAN && data.wanPresence == WanDevicePresence::Offline;
+}
+
+inline std::string wan_device_display_status(const com_dev_data_t &data)
+{
+    return is_wan_device_online(data) && !data.wanDevInfo.status.empty() ? data.wanDevInfo.status : "offline";
+}
 
 struct com_material_mapping_t {
     int toolId;
@@ -134,6 +203,8 @@ struct com_send_gcode_data_t {
     std::string gcodeFilePath;  // utf-8
     std::string thumbFilePath;  // utf-8, wan only
     std::string gcodeDstName;   // utf-8
+    std::string unionId;
+    int  currentPlaterIndex;
     bool printNow;
     bool levelingBeforePrint;
     bool flowCalibration;
@@ -238,8 +309,18 @@ struct com_tracking_event_data_t {
     std::string expIds;
     std::string objectType;
     std::string objectId;
-    std::string searchKeyword;
+    std::string extend;
     std::string timestamp;
+};
+
+struct com_sys_msg_data_t
+{
+    int id;
+    std::string title;
+    std::string content;
+    std::string linkUrl;
+    int duration;
+    int showCount;
 };
 
 struct com_mqtt_config_t {

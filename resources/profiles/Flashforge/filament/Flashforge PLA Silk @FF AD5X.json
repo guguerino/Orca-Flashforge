@@ -1,5 +1,7 @@
 {
-    "type": "filament",
+    "compatible_printers": [
+        "Flashforge AD5X 0.4 nozzle"
+    ],
     "cool_plate_temp": [
         "50"
     ],
@@ -18,9 +20,10 @@
     "filament_type": [
         "SILK"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "instantiation": "true",
-    "setting_id": "GFSA04",
     "hot_plate_temp": [
         "60"
     ],
@@ -28,11 +31,9 @@
         "60"
     ],
     "inherits": "Flashforge Generic PLA-Silk",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA Silk @FF AD5X",
-    "compatible_printers": [
-    "Flashforge AD5X 0.4 nozzle"
-  ],
     "nozzle_temperature": [
         "230"
     ],
@@ -42,6 +43,7 @@
     "pressure_advance": [
         "0.027"
     ],
+    "setting_id": "N6J7QqQ7TIgM3MyW",
     "textured_cool_plate_temp": [
         "50"
     ],
@@ -51,5 +53,6 @@
     "textured_plate_temp_initial_layer": [
         "60"
     ],
+    "type": "filament",
     "version": "2.1.1.0"
 }

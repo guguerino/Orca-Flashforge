@@ -17,6 +17,9 @@
 #include "GUI_App.hpp"
 #include "GUI_Utils.hpp"
 #include "I18N.hpp"
+#ifdef __WXGTK__
+#include "LinuxDisplayBackend.hpp"
+#endif
 #include "MainFrame.hpp"
 #include "MsgDialog.hpp"
 #include "OpenGLManager.hpp"
@@ -28,7 +31,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/uuid/detail/md5.hpp>
 
-#include "GL/glew.h"
+#include <glad/gl.h>
 
 #include <wx/display.h>
 #include <wx/htmllbox.h>
@@ -166,7 +169,7 @@ static bool check_internet_connection_win()
 
 
 // Last version where the info was sent / dialog dismissed is saved in appconfig.
-// Only show the dialog when this info is not found (e.g. fresh install) or when
+// Only show the dialog when this info was not found (e.g. fresh install) or when
 // current version is newer. Only major and minor versions are compared.
 static bool should_dialog_be_shown()
 {
@@ -420,6 +423,28 @@ static std::string generate_system_info_json()
     data_node.put("Linux_DistroID", distro_id);
     data_node.put("Linux_DistroVer", distro_ver);
     data_node.put("Linux_Wayland", wxGetEnv("WAYLAND_DISPLAY", nullptr));
+#ifdef __WXGTK__
+    const LinuxDisplayBackend display_backend = get_linux_display_backend();
+    const char* display_backend_name = "unknown";
+    const char* gl_backend_hint = "Unknown";
+    switch (display_backend) {
+    case LinuxDisplayBackend::Wayland:
+        display_backend_name = "wayland";
+        gl_backend_hint = "EGL";
+        break;
+    case LinuxDisplayBackend::X11:
+        display_backend_name = "x11";
+        gl_backend_hint = "GLX";
+        break;
+    default:
+        break;
+    }
+    data_node.put("Linux_DisplayBackend", display_backend_name);
+    data_node.put("Linux_GLBackendHint", gl_backend_hint);
+#else
+    data_node.put("Linux_DisplayBackend", "unknown");
+    data_node.put("Linux_GLBackendHint", "Unknown");
+#endif
 #endif
     data_node.put("wxWidgets", wxVERSION_NUM_DOT_STRING);
 #ifdef __WXGTK__
@@ -443,7 +468,7 @@ static std::string generate_system_info_json()
 
     pt::ptree hw_node;
     {
-        hw_node.put("ArchName", wxPlatformInfo::Get().GetArchName());
+        hw_node.put("ArchName", wxPlatformInfo::Get().GetBitnessName());
         size_t num = std::round(Slic3r::total_physical_memory()/107374100.);
         hw_node.put("RAM_GiB", std::to_string(num / 10) + "." + std::to_string(num % 10));
     }
@@ -481,7 +506,7 @@ static std::string generate_system_info_json()
         monitor_node.put("height", display.GetGeometry().GetHeight());
 
         // Only get the scaling on Win, it is not reliable on other platforms.
-        #if defined(_WIN32) && wxCHECK_VERSION(3, 1, 2)
+        #if defined(_WIN32)
             double scaling = display.GetPPI().GetWidth() / 96.;
             std::stringstream ss;
             ss << std::setprecision(3) << scaling;
@@ -498,7 +523,7 @@ static std::string generate_system_info_json()
         std::vector<std::wstring> blacklisted_libraries;
         BlacklistedLibraryCheck::get_instance().get_blacklisted(blacklisted_libraries);
         for (const std::wstring& wstr : blacklisted_libraries) {
-            std::string utf8 = boost::nowide::narrow(wstr);
+            std::string utf8 = into_u8(wstr);
             if (size_t last_bs_pos = utf8.find_last_of("\\"); last_bs_pos < utf8.size() - 1) {
                 // Remove anything before last backslash so we don't send the path to the DLL.
                 utf8.erase(0, last_bs_pos + 1);
@@ -728,7 +753,7 @@ bool SendSystemInfoDialog::send_info(wxString& message)
                 if (job_done) // UI thread wants us to cancel.
                     cancel = true;
                 if (cancel)
-                    //result = { Result::Cancelled, _L("Sending system info was cancelled.") };
+                    //result = { Result::Cancelled, _L("Sending system info was canceled.") };
                     result = {Result::Cancelled, wxEmptyString};
             })
             .perform_sync();

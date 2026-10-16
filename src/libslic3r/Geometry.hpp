@@ -4,6 +4,7 @@
 #include "libslic3r.h"
 #include "BoundingBox.hpp"
 #include "ExPolygon.hpp"
+#include "Point.hpp"
 #include "Polygon.hpp"
 #include "Polyline.hpp"
 
@@ -11,11 +12,6 @@
 #include <cereal/access.hpp>
 
 namespace Slic3r {
-
-    namespace ClipperLib {
-        class PolyNode;
-        using PolyNodes = std::vector<PolyNode*>;
-    }
 
 namespace Geometry {
 
@@ -128,8 +124,8 @@ inline bool segments_intersect(
 	const Slic3r::Point &ip1, const Slic3r::Point &ip2, 
 	const Slic3r::Point &jp1, const Slic3r::Point &jp2)
 {    
-    assert(ip1 != ip2);
-    assert(jp1 != jp2);
+    //assert(ip1 != ip2);
+    //assert(jp1 != jp2);
 
     auto segments_could_intersect = [](
         const Slic3r::Point &ip1, const Slic3r::Point &ip2,
@@ -302,7 +298,11 @@ bool directions_perpendicular(double angle1, double angle2, double max_diff = 0)
 template<class T> bool contains(const std::vector<T> &vector, const Point &point);
 template<typename T> T rad2deg(T angle) { return T(180.0) * angle / T(PI); }
 double rad2deg_dir(double angle);
-template<typename T> constexpr T deg2rad(const T angle) { return T(PI) * angle / T(180.0); }
+template<typename T> constexpr T deg2rad(const T angle)
+{
+    static_assert(std::is_floating_point<T>::value, "Why do you want to calculate angle in integer?");
+    return T(PI) * angle / T(180.0);
+}
 template<typename T> T angle_to_0_2PI(T angle)
 {
     static const T TWO_PI = T(2) * T(PI);
@@ -421,6 +421,7 @@ public:
     void set_offset(Axis axis, double offset) { m_matrix.translation()[axis] = offset; }
 
     Vec3d get_rotation() const;
+    Vec3d get_rotation_by_quaternion() const;
     double get_rotation(Axis axis) const { return get_rotation()[axis]; }
 
     Transform3d get_rotation_matrix() const;
@@ -545,6 +546,7 @@ inline bool is_rotation_ninety_degrees(const Vec3d &rotation)
 }
 
 Transformation mat_around_a_point_rotate(const Transformation& innMat, const Vec3d &pt, const Vec3d &axis, float rotate_theta_radian);
+Transformation generate_transform(const Vec3d &x_dir, const Vec3d &y_dir, const Vec3d &z_dir, const Vec3d &origin);
 
 /**
  * Checks if a given point is inside a corner of a polygon.

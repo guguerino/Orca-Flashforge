@@ -17,13 +17,40 @@
 #include "FlashForge/MultiComMgr.hpp"
 #include "FlashForge/LoginDialog.hpp"
 #include "FlashForge/DeviceData.hpp"
+#include "FlashForge/MultiComHelper.hpp"
+#include "DeviceCore/DevManager.h"
 #include "Widgets/FFButton.hpp"
 #include "slic3r/GUI/FFUtils.hpp"
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
 namespace Slic3r {
 namespace GUI {
 
     const int USER_NAME_LENGTH = 180;
+
+static wxImage get_default_user_image()
+{
+    wxImage image;
+    image.LoadFile(Slic3r::GUI::from_u8(Slic3r::var("login_default_usr_pic.png")), wxBITMAP_TYPE_PNG);
+    return image;
+}
+
+static void update_user_panel_image(RoundImagePanel *panel)
+{
+    if (!panel) {
+        return;
+    }
+    if (wxGetApp().getUsrPic().IsOk()) {
+        panel->SetImage(wxGetApp().getUsrPic());
+    } else {
+        wxImage image = get_default_user_image();
+        if (image.IsOk()) {
+            panel->SetImage(image);
+        }
+    }
+}
 
 wxString get_fail_reason(int code)
 {
@@ -56,6 +83,21 @@ wxString get_fail_reason(int code)
 
     else
         return _L("Unknown Failure");
+}
+
+wxString getBindErrnoStr(int ret)
+{
+    switch (ret) {
+    case COM_OK: return "OK";
+    case COM_ABORTED_BY_USER: return "user fatal";
+    case COM_DEVICE_IS_BUSY: return "device is busy";
+    case COM_VERIFY_LAN_DEV_FAILED: return "lan dev failed";
+    case COM_UNAUTHORIZED: return "unauthorized";
+    case COM_INVALID_VALIDATION: return "invalid validation";
+    case COM_DEVICE_HAS_BEEN_BOUND: return "device has been bound";
+    case COM_CONN_SEND_ERROR: return "send error";
+    default: return "unknown error";
+    }
 }
 
 BindMachineDialog::LinkLabel::LinkLabel(wxWindow *parent, const wxString &text, const wxString& link)
@@ -185,9 +227,7 @@ BindMachineDialog::BindMachineDialog()
     m_user_sizer = new wxBoxSizer(wxVERTICAL);
 
     m_user_panel = new RoundImagePanel(m_top_panel, wxSize(FromDIP(80), FromDIP(80)));
-    if (wxGetApp().getUsrPic().IsOk()) {
-        m_user_panel->SetImage(wxGetApp().getUsrPic());
-    }
+    update_user_panel_image(m_user_panel);
     wxGetApp().Bind(EVT_USER_HEAD_IMAGE_UPDATED, &BindMachineDialog::on_user_image_updated, this);
 
     m_user_sizer->AddStretchSpacer(1);
@@ -341,6 +381,7 @@ BindMachineDialog::BindMachineDialog()
 
 BindMachineDialog::~BindMachineDialog()
 {
+    wxGetApp().Unbind(EVT_USER_HEAD_IMAGE_UPDATED, &BindMachineDialog::on_user_image_updated, this);
     Unbind(EVT_BIND_MACHINE_SUCCESS, &BindMachineDialog::on_bind_success, this);
     Unbind(EVT_BIND_MACHINE_FAIL, &BindMachineDialog::on_bind_fail, this);
     if (m_bind_info) {
@@ -378,9 +419,66 @@ void BindMachineDialog::on_result_ok(wxCommandEvent& event)
 
 void BindMachineDialog::on_user_image_updated(wxCommandEvent& event)
 {
-    if (wxGetApp().getUsrPic().IsOk()) {
-        m_user_panel->SetImage(wxGetApp().getUsrPic());
-    }
+    update_user_panel_image(m_user_panel);
+}
+
+void BindMachineDialog::trackLogDataBindStart() 
+{
+    std::string eventType = "action";
+    std::string eventName = "bind_device";
+    std::string uuid = boost::uuids::to_string(boost::uuids::random_generator()());
+    uuid.erase(std::remove(uuid.begin(), uuid.end(), '-'), uuid.end());
+    std::string timestamp = FFUtils::getTimestampMsStr();
+    std::chrono::system_clock::time_point now       = std::chrono::system_clock::now();
+    m_bind_start_stamp    = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    std::string                uid, did, sid;
+    wxGetApp().get_uds_id(uid, did, sid);
+    com_tracking_common_data_t commonData;
+    commonData.uid = uid;
+    commonData.did = did;
+    commonData.sid = sid;
+
+    com_tracking_event_data_t eventData;
+    eventData.eventType  = eventType;
+    eventData.eventId    = (boost::format("%s_%s_%s") % eventName % timestamp % uuid).str();
+    eventData.eventName  = eventName;
+    eventData.pageId     = "bind_page";
+    eventData.timestamp = timestamp;
+
+    MultiComHelper::inst()->reportTrackingData(commonData, eventData, ComTimeoutWanB);
+}
+
+void BindMachineDialog::trackLogDataBindEnd(std::string res, std::string msg)
+{
+    std::string eventType = "action";
+    std::string eventName = "bind_status";
+    std::string uuid      = boost::uuids::to_string(boost::uuids::random_generator()());
+    uuid.erase(std::remove(uuid.begin(), uuid.end(), '-'), uuid.end());
+    std::string timestamp = FFUtils::getTimestampMsStr();
+    std::chrono::system_clock::time_point now       = std::chrono::system_clock::now();
+    int end_stamp                              = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    std::string uid, did, sid;
+    wxGetApp().get_uds_id(uid, did, sid);
+    com_tracking_common_data_t commonData;
+    commonData.uid = uid;
+    commonData.did = did;
+    commonData.sid = sid;
+
+    com_tracking_event_data_t eventData;
+    eventData.eventType = eventType;
+    eventData.eventId   = (boost::format("%s_%s_%s") % eventName % timestamp % uuid).str();
+    eventData.eventName = eventName;
+    eventData.pageId    = "bind_page";
+    json j;
+    j["status"]                   = res;
+    j["msg"]                      = msg;
+    j["response_ts"]              = std::to_string(end_stamp - m_bind_start_stamp);
+    eventData.extend              = j.dump();
+    eventData.timestamp = timestamp;
+
+    MultiComHelper::inst()->reportTrackingData(commonData, eventData, ComTimeoutWanB);
 }
 
 void BindMachineDialog::on_close(wxCloseEvent &event)
@@ -397,6 +495,7 @@ void BindMachineDialog::on_bind_fail(wxCommandEvent &event)
     m_result_sizer->Layout();
     m_simplebook->SetSelection(1);
     m_bind_btn->Enable(true);
+    trackLogDataBindEnd("fail", getBindErrnoStr(m_result_code).utf8_string());
     //GetSizer()->Fit(this);
     Layout();
     //Fit();
@@ -409,11 +508,12 @@ void BindMachineDialog::on_bind_success(wxCommandEvent &event)
     m_result_text->SetForegroundColour(wxColor("#419488"));
     m_result_sizer->Layout();
     m_simplebook->SetSelection(1);
+    trackLogDataBindEnd("success", "");
     //GetSizer()->Fit(this);
     Layout();
     //Fit();
     //EndModal(wxID_OK);
-    if(m_machine_info) wxGetApp().on_start_subscribe_again(m_machine_info->dev_id);
+    if (m_machine_info) wxGetApp().on_start_subscribe_again(m_machine_info->get_dev_id());
 }
 
 void BindMachineDialog::on_bind_printer(wxCommandEvent &event)
@@ -444,16 +544,12 @@ void BindMachineDialog::on_bind_printer(wxCommandEvent &event)
     #endif
 
 
-    BOOST_LOG_TRIVIAL(info) << "on_bind_printer: " << m_bind_info->dev_id
-                            << "--dev_ip:" << m_bind_info->dev_ip
-                            << "--dev_port:" << m_bind_info->dev_port
-                            << "--dev_pid:" << m_bind_info->dev_pid
-                            << "--dev_name: " << m_bind_info->dev_name
-                            << "--dev_bind_type: " << m_bind_info->dev_bind_type;
+    BOOST_LOG_TRIVIAL(info) << "on_bind_printer";
     m_bind_job = std::make_shared<BindJob>(m_bind_info->dev_ip, m_bind_info->dev_port,
         m_bind_info->dev_id, m_bind_info->dev_pid, m_bind_info->dev_name, m_bind_info->dev_bind_type);
     m_bind_job->set_event_handle(this);
     m_bind_job->process();
+    trackLogDataBindStart();
 }
 
 void BindMachineDialog::on_dpi_changed(const wxRect &suggested_rect)
@@ -501,7 +597,6 @@ void BindMachineDialog::on_show(wxShowEvent &event)
 
         if (LoginDialog::IsUsrLogin()) {
             auto user_info = LoginDialog::GetUsrInfo();
-            BOOST_LOG_TRIVIAL(error) << "Get user info: nickname (" << user_info.nickname << "), headImgUrl (" << user_info.headImgUrl << ")";
 
             wxString username = wxString::FromUTF8(user_info.nickname);
             wxGCDC   dc(this);
@@ -554,9 +649,7 @@ UnBindMachineDialog::UnBindMachineDialog()
     m_user_sizer = new wxBoxSizer(wxVERTICAL);
 
     m_user_panel = new RoundImagePanel(this, wxSize(FromDIP(80), FromDIP(80)));
-    if (wxGetApp().getUsrPic().IsOk()) {
-        m_user_panel->SetImage(wxGetApp().getUsrPic());
-    }
+    update_user_panel_image(m_user_panel);
     wxGetApp().Bind(EVT_USER_HEAD_IMAGE_UPDATED, &UnBindMachineDialog::on_user_image_updated, this);
 
     m_user_sizer->AddStretchSpacer(1);
@@ -632,6 +725,7 @@ UnBindMachineDialog::UnBindMachineDialog()
 
 UnBindMachineDialog::~UnBindMachineDialog()
 {
+    wxGetApp().Unbind(EVT_USER_HEAD_IMAGE_UPDATED, &UnBindMachineDialog::on_user_image_updated, this);
     Unbind(EVT_UNBIND_MACHINE_COMPLETED, &UnBindMachineDialog::on_unbind_completed, this);
     if (m_unbind_info) {
         delete m_unbind_info;
@@ -668,9 +762,7 @@ void UnBindMachineDialog::on_result_ok(wxCommandEvent& event)
 
 void UnBindMachineDialog::on_user_image_updated(wxCommandEvent& event)
 {
-    if (wxGetApp().getUsrPic().IsOk()) {
-        m_user_panel->SetImage(wxGetApp().getUsrPic());
-    }
+    update_user_panel_image(m_user_panel);
 }
 
 void UnBindMachineDialog::on_close(wxCloseEvent &event)
@@ -767,7 +859,6 @@ void UnBindMachineDialog::on_show(wxShowEvent &event)
 
         if (LoginDialog::IsUsrLogin()) {
             auto user_info = LoginDialog::GetUsrInfo();
-            BOOST_LOG_TRIVIAL(error) << "Get user info: nickname (" << user_info.nickname << "), headImgUrl (" << user_info.headImgUrl << ")";
             wxString username = wxString::FromUTF8(user_info.nickname);
             wxGCDC   dc(this);
             wxString clipName = FFUtils::trimString(dc, username, FromDIP(USER_NAME_LENGTH));

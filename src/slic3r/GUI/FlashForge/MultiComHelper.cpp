@@ -60,7 +60,7 @@ void MultiComHelper::reportTrackingData(const com_tracking_common_data_t &common
         fnetEventData.expIds = eventData.expIds.c_str();
         fnetEventData.objectType = eventData.objectType.c_str();
         fnetEventData.objectId = eventData.objectId.c_str();
-        fnetEventData.searchKeyword = eventData.searchKeyword.c_str();
+        fnetEventData.extend = eventData.extend.c_str();
         fnetEventData.timestamp = eventData.timestamp.c_str();
 
         ComErrno ret = MultiComUtils::fnetRet2ComErrno(intfc->reportTrackingData(m_clinetId.c_str(),
@@ -105,7 +105,7 @@ void MultiComHelper::reportTrackingDataBatchSync(const com_tracking_common_data_
         fnetEventDatas[i].expIds = eventDatas[i].expIds.c_str();
         fnetEventDatas[i].objectType = eventDatas[i].objectType.c_str();
         fnetEventDatas[i].objectId = eventDatas[i].objectId.c_str();
-        fnetEventDatas[i].searchKeyword = eventDatas[i].searchKeyword.c_str();
+        fnetEventDatas[i].extend = eventDatas[i].extend.c_str();
         fnetEventDatas[i].timestamp = eventDatas[i].timestamp.c_str();
     }
     ComErrno ret = MultiComUtils::fnetRet2ComErrno(intfc->reportTrackingDataBatch(m_clinetId.c_str(),
@@ -153,6 +153,22 @@ int64_t MultiComHelper::removePrintListModel(const std::string &modelId, int msT
     return requestId;
 }
 
+int64_t MultiComHelper::likeModel(const std::string& modelId, bool like, int msTimeout) 
+{ 
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return InvalidRequestId;
+    }
+    int64_t requestId = m_requestNum++;
+    m_threadPool.post([=]() {
+        ScopedWanDevToken token = WanDevTokenMgr::inst()->getScopedToken();
+        ComErrno          ret   = MultiComUtils::fnetRet2ComErrno(
+            intfc->navLikeModel(m_clinetId.c_str(), token.accessToken().c_str(), modelId.c_str(), like, msTimeout));
+        QueueEvent(new ComBusRequestEvent(COM_LIKE_MODEL_EVENT, requestId, "", ret));
+    });
+    return requestId;
+}
+
 int64_t MultiComHelper::reportModel(int selectedOptionId, const std::string &modelId,
     const std::string &extraMessage, int msTimeout)
 {
@@ -172,6 +188,97 @@ int64_t MultiComHelper::reportModel(int selectedOptionId, const std::string &mod
         QueueEvent(new ComBusRequestEvent(COM_REPORT_MODEL_EVENT, requestId, "", ret));
     });
     return requestId;
+}
+
+int64_t MultiComHelper::getSystemMessage(com_sys_msg_data_t& data, const std::string& language, int msTimeout) 
+{
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return COM_ERROR;
+    }
+    ScopedWanDevToken           token = WanDevTokenMgr::inst()->getScopedToken();
+    fnet_sys_msg_data_t* fnetInfo;
+    ComErrno                    ret = MultiComUtils::fnetRet2ComErrno(
+        intfc->getSystemMessage(m_clinetId.c_str(), token.accessToken().c_str(), language.c_str(), &fnetInfo, msTimeout));
+    if (ret != COM_OK) {
+        return ret;
+    }
+    if (fnetInfo == nullptr) {
+        return COM_ERROR;
+    }
+    fnet::FreeInDestructor freeDevInfos(fnetInfo, intfc->freeSystemMessage);
+    data.content = fnetInfo->content;
+    data.id = fnetInfo->id;
+    data.title = fnetInfo->title;
+    data.linkUrl = fnetInfo->linkUrl;
+    data.showCount = fnetInfo->showCount;
+    data.duration  = fnetInfo->duration;
+    return ret;
+}
+
+int64_t MultiComHelper::getMonitorMessage(std::string& data, const std::string& language, int msTimeout)
+{
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return COM_ERROR;
+    }
+    ScopedWanDevToken    token = WanDevTokenMgr::inst()->getScopedToken();
+    fnet_sys_msg_data_t* fnetInfo;
+    ComErrno             ret = MultiComUtils::fnetRet2ComErrno(
+        intfc->getMonitorMessage(m_clinetId.c_str(), token.accessToken().c_str(), language.c_str(), &fnetInfo, msTimeout));
+    if (ret != COM_OK) {
+        return ret;
+    }
+    if (fnetInfo == nullptr) {
+        return COM_ERROR;
+    }
+    fnet::FreeInDestructor freeDevInfos(fnetInfo, intfc->freeSystemMessage);
+    data   = fnetInfo->content;
+    return ret;
+}
+
+int64_t MultiComHelper::retrySliceTask(const std::string& id, int msTimeout) 
+{
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return COM_ERROR;
+    }
+    ScopedWanDevToken token = WanDevTokenMgr::inst()->getScopedToken();
+    ComErrno          ret   = MultiComUtils::fnetRet2ComErrno(
+        intfc->retrySliceTask(m_clinetId.c_str(), token.accessToken().c_str(), id.c_str(), msTimeout));
+    if (ret != COM_OK) {
+        return ret;
+    }
+    return ret;
+}
+
+int64_t MultiComHelper::cancelSliceTask(const std::string& id, int msTimeout) 
+{
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return COM_ERROR;
+    }
+    ScopedWanDevToken token = WanDevTokenMgr::inst()->getScopedToken();
+    ComErrno          ret   = MultiComUtils::fnetRet2ComErrno(
+        intfc->cancelSliceTask(m_clinetId.c_str(), token.accessToken().c_str(), id.c_str(), msTimeout));
+    if (ret != COM_OK) {
+        return ret;
+    }
+    return ret;
+}
+
+int64_t MultiComHelper::postReadSystemMessage(int id, int msTimeout) {
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return COM_ERROR;
+    }
+    ScopedWanDevToken    token = WanDevTokenMgr::inst()->getScopedToken();
+    ComErrno             ret = MultiComUtils::fnetRet2ComErrno(
+        intfc->postReadSystemMessage(m_clinetId.c_str(), token.accessToken().c_str(), id, msTimeout));
+    if (ret != COM_OK) {
+        return ret;
+    }
+    return ret;
 }
 
 int64_t MultiComHelper::doBusGetRequest(const std::string &target, const std::string &language, int msTimeout)
@@ -292,6 +399,51 @@ ComErrno MultiComHelper::uploadAiImageClound(const std::string &filePath, const 
     fnet::FreeInDestructor freeCloundFileData(cloundFileData, intfc->freeCloundFileData);
     storeUrl = cloundFileData->storageUrl;
     return ret;
+}
+
+ComErrno MultiComHelper::uploadLogFileCloud(const std::string&       filePath,
+                                            const std::string&       saveName,
+                                            const std::string&       connectEmail,
+                                            fnet_progress_callback_t callback,
+                                            void*                    callbackData,
+                                            int                      msTimeout)
+{
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr) {
+        return COM_ERROR;
+    }
+    ScopedWanDevToken       token       = WanDevTokenMgr::inst()->getScopedToken();
+    const char*             accessToken = token.accessToken().c_str();
+    fnet_upload_file_data_t uploadFileData;
+    uploadFileData.filePath     = filePath.c_str();
+    uploadFileData.saveName     = saveName.c_str();
+    uploadFileData.callback     = callback;
+    uploadFileData.callbackData = callbackData;
+    ComErrno                 ret = MultiComUtils::fnetRet2ComErrno(
+        intfc->uploadLogFileCloud(m_clinetId.c_str(), accessToken, &uploadFileData, connectEmail.c_str(), msTimeout));
+    return ret;
+}
+
+ComErrno MultiComHelper::uploadFeedbackLogFileCloud(const std::string& clientId,
+                                                    const std::string& accessToken,
+                                                    const std::string& filePath,
+                                                    const std::string& saveName,
+                                                    const std::string& feedbackId,
+                                                    fnet_progress_callback_t callback,
+                                                    void*                    callbackData,
+                                                    int                msTimeout)
+{
+    fnet::FlashNetworkIntfc* intfc = MultiComMgr::inst()->networkIntfc();
+    if (intfc == nullptr || clientId.empty() || accessToken.empty() || feedbackId.empty()) {
+        return COM_ERROR;
+    }
+    fnet_upload_file_data_t uploadFileData;
+    uploadFileData.filePath     = filePath.c_str();
+    uploadFileData.saveName     = saveName.c_str();
+    uploadFileData.callback     = callback;
+    uploadFileData.callbackData = callbackData;
+    return MultiComUtils::fnetRet2ComErrno(
+        intfc->uploadLogFileCloudEx(clientId.c_str(), accessToken.c_str(), &uploadFileData, "", feedbackId.c_str(), msTimeout));
 }
 
 ComErrno MultiComHelper::createAiJobPipeline(const std::string &entryType,

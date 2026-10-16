@@ -30,6 +30,8 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/PresetUpdater.hpp"
 
+#include <unordered_map>
+
 #include <nlohmann/json.hpp>
 
 namespace Slic3r { namespace GUI {
@@ -73,7 +75,8 @@ public:
     bool IsFirstUse();
 
     //Model - Machine - Filaments
-    int LoadProfile();
+    int LoadProfileData();
+    int SaveProfileData();
     int LoadProfileFamily(std::string strVendor, std::string strFilePath);
     int SaveProfile();
     int GetFilamentInfo( std::string VendorDirectory,json & pFilaList, std::string filepath, std::string &sVendor, std::string &sType);
@@ -107,6 +110,11 @@ private:
     boost::filesystem::path vendor_dir;
     boost::filesystem::path rsrc_vendor_dir;
 
+    //First Load
+    bool bFirstComplete{false};
+    bool m_destroy{false};
+    boost::thread* m_load_task{ nullptr };
+
     // User Config
     bool PrivacyUse;
     bool StealthMode;
@@ -129,6 +137,14 @@ private:
 
     wxString m_bbl_user_agent;
     std::string m_editing_filament_id;
+
+    struct CachedFilamentInfo
+    {
+        int         status{-1};
+        std::string vendor;
+        std::string type;
+    };
+    std::unordered_map<std::string, CachedFilamentInfo> filament_info_cache;
 };
 
 }} // namespace Slic3r::GUI

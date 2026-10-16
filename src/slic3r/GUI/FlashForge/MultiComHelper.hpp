@@ -32,8 +32,20 @@ public:
 
     int64_t removePrintListModel(const std::string &modelId, int msTimeout);
 
+    int64_t likeModel(const std::string& modelId, bool like, int msTimeout);
+
     int64_t reportModel(int selectedOptionId, const std::string &modelId,
         const std::string &extraMessage, int msTimeout);
+
+    int64_t getSystemMessage(com_sys_msg_data_t& data, const std::string &language, int msTimeout);
+
+    int64_t postReadSystemMessage(int id, int msTimeout);
+
+    int64_t getMonitorMessage(std::string& data, const std::string& language, int msTimeout);
+
+    int64_t retrySliceTask(const std::string& id, int msTimeout);
+
+    int64_t cancelSliceTask(const std::string& id, int msTimeout);
 
     int64_t doBusGetRequest(const std::string &target, const std::string &language, int msTimeout);
 
@@ -48,6 +60,22 @@ public:
 
     ComErrno uploadAiImageClound(const std::string &filePath, const std::string &saveName,
         std::string &storeUrl, fnet_progress_callback_t callback, void *callbackData, int msTimeout);
+
+    ComErrno uploadLogFileCloud(const std::string&       filePath,
+                                const std::string&       saveName,
+                                const std::string&       connectEmail,
+                                fnet_progress_callback_t callback,
+                                void*                    callbackData,
+                                int                      msTimeout);
+
+    ComErrno uploadFeedbackLogFileCloud(const std::string& clientId,
+                                        const std::string& accessToken,
+                                        const std::string& filePath,
+                                        const std::string& saveName,
+                                        const std::string& feedbackId,
+                                        fnet_progress_callback_t callback,
+                                        void*                    callbackData,
+                                        int                msTimeout);
 
     ComErrno createAiJobPipeline(const std::string &entryType,
         com_ai_job_pipeline_info_t &pipelineInfo, int msTimeout); // entryType: text2text/img2img

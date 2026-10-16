@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Polygon.hpp"
 #include "WipeTower.hpp"
 namespace Slic3r
 {
@@ -30,7 +31,8 @@ public:
     WipeTower::ToolChangeResult construct_tcr(WipeTowerWriter2& writer,
                                    bool priming,
                                    size_t old_tool,
-								   bool is_finish) const;
+								   bool is_finish,
+                                   bool is_contact = false) const;
 
 	// x			-- x coordinates of wipe tower in mm ( left bottom corner )
 	// y			-- y coordinates of wipe tower in mm ( left bottom corner )
@@ -49,18 +51,34 @@ public:
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
     void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f);
+    void plan_local_z_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f);
+    // Reserve Local-Z wipe-tower slots for unplanned toolchanges during Local-Z sub-layer emission.
+    void plan_local_z_reserve(float z_par, float layer_height_par, size_t reserve_slot_count, float wipe_volume = 0.f);
 
 	// Iterates through prepared m_plan, generates ToolChangeResults and appends them to "result"
-	void generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &result);
+	void generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &result,
+                  std::vector<std::vector<WipeTower::ToolChangeResult>> &local_z_result);
 
     float get_depth() const { return m_wipe_tower_depth; }
 	std::vector<std::pair<float, float>> get_z_and_depth_pairs() const;
+    std::vector<std::vector<WipeTower::box_coordinates>> get_local_z_reserve_boxes() const;
     float get_brim_width() const { return m_wipe_tower_brim_width_real; }
 	float get_wipe_tower_height() const { return m_wipe_tower_height; }
-
-
-
-
+    // ORCA: Match WipeTower API used by Print skirt/brim planning.
+    // Returned bounding box is in WIPE-TOWER-LOCAL coordinates (before placement on the bed).
+    // Computed from the actual first-layer polygon (including brim), like WipeTower::get_bbx().
+    BoundingBoxf get_bbx() const {
+        if (m_first_layer_bbx.defined)
+            return m_first_layer_bbx;
+        // Fallback: nominal rectangle (used if generate() hasn't run yet)
+        const float brim = m_wipe_tower_brim_width_real;
+        return BoundingBoxf(Vec2d(-brim, -brim), Vec2d(double(m_wipe_tower_width) + brim, double(m_wipe_tower_depth) + brim));
+    }
+    // WT2 doesn't currently compute a rib-origin compensation like WipeTower (m_rib_offset),
+    // so expose a zero offset for consistency purposes (to maintain API parity).
+    Vec2f get_rib_offset() const { return Vec2f::Zero(); }
+    float get_rib_width() const { return m_rib_width; }
+    float get_rib_length() const { return m_rib_length; }
 
 	// Switch to a next layer.
 	void set_layer(
@@ -79,13 +97,16 @@ public:
 		m_layer_height			= layer_height;
 		m_depth_traversed  = 0.f;
         m_current_layer_finished = false;
+        m_prev_layer_had_interface = m_current_layer_has_interface;
 
 		
         // Advance m_layer_info iterator, making sure we got it right
 		while (!m_plan.empty() && m_layer_info->z < print_z - WT_EPSILON && m_layer_info+1 != m_plan.end())
 			++m_layer_info;
+        m_current_layer_has_interface = (m_layer_info != m_plan.end()) && (m_layer_info->toolchanges_depth() > WT_EPSILON);
 
-		m_current_shape = (! this->is_first_layer() && m_current_shape == SHAPE_NORMAL) ? SHAPE_REVERSED : SHAPE_NORMAL;
+		//m_current_shape = (! this->is_first_layer() && m_current_shape == SHAPE_NORMAL) ? SHAPE_REVERSED : SHAPE_NORMAL;
+        m_current_shape = SHAPE_NORMAL;
 		if (this->is_first_layer()) {
             m_num_layer_changes = 0;
             m_num_tool_changes 	= 0;
@@ -116,6 +137,9 @@ public:
 	// Returns gcode for a toolchange and a final print head position.
 	// On the first layer, extrude a brim around the future wipe tower first.
     WipeTower::ToolChangeResult tool_change(size_t new_tool);
+    // Emit a mini toolchange into a pre-reserved Local-Z wipe slot (does not consume m_plan).
+    WipeTower::ToolChangeResult local_z_tool_change(size_t new_tool, const WipeTower::box_coordinates& cleaning_box, float wipe_volume);
+    void set_current_tool(size_t tool) { m_current_tool = tool; }
 
 	// Fill the unfilled space with a sparse infill.
 	// Call this method only if layer_finished() is false.
@@ -135,6 +159,7 @@ public:
         bool                is_soluble = false;
         int  			    temperature = 0;
         int  			    first_layer_temperature = 0;
+        int                 interface_print_temperature = 0;
         float               loading_speed = 0.f;
         float               loading_speed_start = 0.f;
         float               unloading_speed = 0.f;
@@ -156,9 +181,17 @@ public:
 		bool			    multitool_ramming;
 		float               multitool_ramming_time = 0.f;
 		float               filament_minimal_purge_on_wipe_tower = 0.f;
+        float               retract_length;
+        float               retract_speed;
+        float               tower_interface_pre_extrusion_dist = 0.f;
+        float               tower_interface_pre_extrusion_length = 0.f;
+        float               tower_ironing_area = 4.f;
+        float               tower_interface_purge_length = 0.f;
     };
 
 private:
+    struct WipeTowerInfo;
+
 	enum wipe_shape // A fill-in direction
 	{
 		SHAPE_NORMAL = 1,
@@ -175,6 +208,7 @@ private:
 	bool   m_semm               = true; // Are we using a single extruder multimaterial printer?
 	bool   m_enable_filament_ramming = true;
 	bool   m_is_mk4mmu3         = false;
+    int    m_wipe_tower_filament = 0;   // 1-based config value, 0 means auto
     Vec2f  m_wipe_tower_pos; 			// Left front corner of the wipe tower in mm.
 	float  m_wipe_tower_width; 			// Width of the wipe tower.
 	float  m_wipe_tower_depth 	= 0.f; 	// Depth of the wipe tower
@@ -182,6 +216,7 @@ private:
 	float  m_wipe_tower_cone_angle = 0.f;
     float  m_wipe_tower_brim_width      = 0.f; 	// Width of brim (mm) from config
     float  m_wipe_tower_brim_width_real = 0.f; 	// Width of brim (mm) after generation
+    BoundingBoxf m_first_layer_bbx;              // Actual first-layer bounding box (incl. brim/ribs)
 	float  m_wipe_tower_rotation_angle = 0.f; // Wipe tower rotation angle in degrees (with respect to x axis)
     float  m_internal_rotation  = 0.f;
 	float  m_y_shift			= 0.f;  // y shift passed to writer
@@ -195,6 +230,19 @@ private:
 	float  m_perimeter_speed    = 0.f;
     float  m_first_layer_speed  = 0.f;
     size_t m_first_layer_idx    = size_t(-1);
+    bool   m_flat_ironing       = false;
+    bool   m_enable_tower_interface_features = false;
+    bool   m_enable_tower_interface_cooldown_during_tower = false;
+    bool   m_prev_layer_had_interface = false;
+    bool   m_current_layer_has_interface = false;
+
+	int m_wall_type;
+    bool   m_used_fillet                  = true;
+    float  m_rib_width                    = 10;
+    float  m_extra_rib_length             = 0;
+    float  m_rib_length                   = 0;
+
+    bool   m_enable_arc_fitting           = false;
 
 	// G-code generator parameters.
     float           m_cooling_tube_retraction   = 0.f;
@@ -221,6 +269,9 @@ private:
 
 	// Extruder specific parameters.
     std::vector<FilamentParameters> m_filpar;
+
+    // Number of wipe-tower purge lines to reserve per Local-Z unplanned toolchange slot.
+    float m_local_z_wipe_tower_purge_lines = 3.f;
 
 	// State of the wipe tower generator.
 	unsigned int m_num_layer_changes = 0; // Layer change counter for the output statistics.
@@ -271,9 +322,16 @@ private:
 		float z;		// z position of the layer
 		float height;	// layer height
 		float depth;	// depth of the layer based on all layers above
-		float toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }
+        float normal_toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }
+        float local_z_toolchanges_depth() const { float sum = 0.f; for (const auto &a : local_z_tool_changes) sum += a.required_depth; return sum; }
+		float toolchanges_depth() const { return normal_toolchanges_depth() + local_z_toolchanges_depth(); }
+        float local_z_reserve_slot_depth { 0.f };
+        size_t local_z_reserve_slot_count { 0 };
+        float local_z_reserve_depth() const { return local_z_reserve_slot_depth * float(local_z_reserve_slot_count); }
+        float planned_depth() const { return toolchanges_depth() + local_z_reserve_depth(); }
 
 		std::vector<ToolChange> tool_changes;
+        std::vector<ToolChange> local_z_tool_changes;
 
 		WipeTowerInfo(float z_par, float layer_height_par)
 			: z{z_par}, height{layer_height_par}, depth{0} {}
@@ -281,6 +339,7 @@ private:
 
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
+    const WipeTowerInfo::ToolChange     *m_active_tool_change = nullptr;
 
 	// This sums height of all extruded layers, not counting the layers which
 	// will be later removed when the "no_sparse_layers" is used.
@@ -294,6 +353,9 @@ private:
     // ot -1 if there is no such toolchange.
     int first_toolchange_to_nonsoluble(
             const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const;
+    bool layer_has_soluble_toolchange(const WipeTowerInfo &layer) const;
+    float cumulative_toolchange_depth_before(const WipeTowerInfo::ToolChange *tool_change) const;
+    WipeTower::ToolChangeResult emit_planned_tool_change(const WipeTowerInfo::ToolChange *tool_change);
 
 	void toolchange_Unload(
 		WipeTowerWriter2 &writer,
@@ -314,7 +376,26 @@ private:
 	void toolchange_Wipe(
 		WipeTowerWriter2 &writer,
 		const WipeTower::box_coordinates  &cleaning_box,
-		float wipe_volume);
+		float wipe_volume,
+        bool interface_layer);
+
+
+    Polygon generate_support_rib_wall(WipeTowerWriter2&                 writer,
+                                      const WipeTower::box_coordinates& wt_box,
+                                      double                 feedrate,
+                                      bool                   first_layer,
+                                      bool                   rib_wall,
+                                      bool                   extrude_perimeter,
+                                      bool                   skip_points);
+
+    Polygon generate_support_cone_wall(
+        WipeTowerWriter2& writer, 
+		const WipeTower::box_coordinates& wt_box, 
+		double feedrate, 
+		bool infill_cone, 
+		float spacing);
+
+    Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
 };
 
 

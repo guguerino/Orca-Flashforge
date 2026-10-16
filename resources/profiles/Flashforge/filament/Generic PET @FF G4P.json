@@ -2,6 +2,9 @@
     "additional_cooling_fan_speed": [
         "0"
     ],
+    "compatible_printers": [
+        "Flashforge Guider4 Pro 0.4 nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "50"
     ],
@@ -44,11 +47,10 @@
     "filament_type": [
         "PET"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-        "Flashforge Guider4 Pro 0.4 nozzle"
+    "filament_vendor": [
+        "Generic"
     ],
+    "from": "system",
     "hot_plate_temp": [
         "80"
     ],
@@ -56,6 +58,8 @@
         "80"
     ],
     "inherits": "Flashforge Generic TPU",
+    "setting_id": "1Lyq9gOfcZ5hPIdW",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Generic PET @FF G4P",
     "nozzle_temperature": [

@@ -1,4 +1,4 @@
-#include <catch2/catch.hpp>
+#include <catch2/catch_all.hpp>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Print.hpp"
@@ -9,7 +9,19 @@
 using namespace Slic3r;
 using namespace Slic3r::Test;
 
-SCENARIO("PrintObject: Perimeter generation", "[PrintObject]") {
+TEST_CASE("Wipe tower clamp correction does not overwrite a user move", "[Print][WipeTower]")
+{
+    const Vec2d original(190., 190.);
+    const Vec2d corrected(139.95, 139.95);
+    const Vec2d user_position(80., 70.);
+
+    CHECK(is_approx(Print::resolve_wipe_tower_position(original, true, original, corrected), corrected));
+    CHECK(is_approx(Print::resolve_wipe_tower_position(corrected, true, original, corrected), corrected));
+    CHECK(is_approx(Print::resolve_wipe_tower_position(user_position, true, original, corrected), user_position));
+    CHECK(is_approx(Print::resolve_wipe_tower_position(original, false, original, corrected), original));
+}
+
+SCENARIO("PrintObject: Perimeter generation", "[PrintObject][.]") {
     GIVEN("20mm cube and default config") {
         WHEN("make_perimeters() is called")  {
             Slic3r::Print print;
@@ -30,7 +42,7 @@ SCENARIO("PrintObject: Perimeter generation", "[PrintObject]") {
     }
 }
 
-SCENARIO("Print: Skirt generation", "[Print]") {
+SCENARIO("Print: Skirt generation", "[Print][.]") {
     GIVEN("20mm cube and default config") {
         WHEN("Skirts is set to 2 loops")  {
             Slic3r::Print print;
@@ -47,7 +59,7 @@ SCENARIO("Print: Skirt generation", "[Print]") {
     }
 }
 
-SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces to become internal.", "[Print]") {
+SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces to become internal.", "[Print][.]") {
     GIVEN("sliced 20mm cube and config with top_solid_surfaces = 2 and bottom_solid_surfaces = 1") {
         Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
 		config.set_deserialize_strict({
@@ -90,7 +102,7 @@ SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces t
     }
 }
 
-SCENARIO("Print: Brim generation", "[Print]") {
+SCENARIO("Print: Brim generation", "[Print][.]") {
     GIVEN("20mm cube and default config, 1mm first layer width") {
         WHEN("Brim is set to 3mm")  {
 	        Slic3r::Print print;
@@ -99,7 +111,11 @@ SCENARIO("Print: Brim generation", "[Print]") {
 	        	{ "brim_width", 					3 }
 	        });
             THEN("Brim Extrusion collection has 3 loops in it") {
-                REQUIRE(print.brim().items_count() == 3);
+                size_t total_items = 0;
+                for (const auto& pair : print.get_brimMap()) {
+                    total_items += pair.second.items_count();
+                }
+                REQUIRE(total_items == 3);
             }
         }
         WHEN("Brim is set to 6mm")  {
@@ -109,7 +125,11 @@ SCENARIO("Print: Brim generation", "[Print]") {
 	        	{ "brim_width", 					6 }
 	        });
             THEN("Brim Extrusion collection has 6 loops in it") {
-                REQUIRE(print.brim().items_count() == 6);
+                size_t total_items = 0;
+                for (const auto& pair : print.get_brimMap()) {
+                    total_items += pair.second.items_count();
+                }
+                REQUIRE(total_items == 6);
             }
         }
         WHEN("Brim is set to 6mm, extrusion width 0.5mm")  {
@@ -121,7 +141,11 @@ SCENARIO("Print: Brim generation", "[Print]") {
 	        });
 			print.process();
             THEN("Brim Extrusion collection has 12 loops in it") {
-                REQUIRE(print.brim().items_count() == 14);
+                size_t total_items = 0;
+                for (const auto& pair : print.get_brimMap()) {
+                    total_items += pair.second.items_count();
+                }
+                REQUIRE(total_items == 14);
             }
         }
     }

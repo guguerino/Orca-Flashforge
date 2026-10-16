@@ -23,9 +23,11 @@
 #include "Project.hpp"
 #include "CalibrationPanel.hpp"
 #include "UnsavedChangesDialog.hpp"
+#include "Widgets/ProgressDialog.hpp"
 #include "Widgets/SideButton.hpp"
 #include "Widgets/SideMenuPopup.hpp"
 #include "FlashForge/GuideWebPanel.h"
+#include "FilamentGroupPopup.hpp"
 
 #include <boost/property_tree/ptree_fwd.hpp>
 
@@ -52,6 +54,9 @@ class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
 class ParamsDialog;
+#ifdef __WXGTK__
+class ResizeEdgePanel;
+#endif
 
 enum QuickSlice
 {
@@ -89,9 +94,44 @@ protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
 };
 
+class MsgTipBar : public wxPanel
+{
+public:
+    MsgTipBar(wxWindow* parent);
+    ~MsgTipBar();
+    void SetMonitorMsg(const wxString& text);
+    void SetMsg(int id, const wxString& text, int close_time, const wxString& url = "");
+    void ShowMsg(bool isMonitor = false);
+    void CloseMsg();
+
+private:
+    Label*      m_text;
+    Label*      m_time_text;
+    FFButton*   m_closeBtn;
+    wxTimer*    m_closeTimer;
+    wxTimer*    m_scrollTimer;
+    wxPanel*    m_text_panel;
+    wxString    m_url;
+    wxString    m_textStr;
+    wxString    m_monitorStr;
+    int         m_id{-1};
+    int         m_close_time{10};
+    int         m_main_time{10};
+    int         m_posX{0};
+    int         m_app_remain_count{0};
+    int         m_default_time{10};
+    bool        m_isMonitor{true};
+    void        ScrollTimeOut(wxTimerEvent& evt);
+    void        BindChildLeftDown(wxWindow* parent, wxWindow* child);
+};
+
 class MainFrame : public DPIFrame
 {
+#ifdef __APPLE__
+    bool     m_mac_fullscreen{false};
+#endif
     bool        m_loaded {false};
+    bool        m_firstGotoMonitor{true};
     wxTimer* m_reset_title_text_colour_timer{ nullptr };
 
     wxString    m_qs_last_input_file = wxEmptyString;
@@ -107,7 +147,9 @@ class MainFrame : public DPIFrame
     wxMenuItem* m_menu_item_repeat { nullptr }; // doesn't used now
 #endif
     wxMenuItem* m_menu_item_reslice_now { nullptr };
+    MsgTipBar*  m_msg_tip{nullptr};
     wxSizer*    m_main_sizer{ nullptr };
+    ProgressDialog* m_log_progress_dlg{nullptr};
 
     size_t      m_last_selected_tab;
 
@@ -198,14 +240,16 @@ protected:
     virtual void on_dpi_changed(const wxRect &suggested_rect) override;
     virtual void on_sys_color_changed() override;
 
-#ifdef __WIN32__
+#ifdef __WXMSW__
     WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
 #endif
 
 public:
     MainFrame();
     ~MainFrame() = default;
-
+#ifdef __APPLE__
+    bool get_mac_full_screen() { return m_mac_fullscreen; }
+#endif
     //BBS GUI refactor
     enum TabPosition
     {
@@ -251,6 +295,8 @@ public:
     bool        is_shutdown() { return m_is_shutdown;  }
 
     Plater*     plater() { return m_plater; }
+    MsgTipBar* msgTipBar() { return m_msg_tip; }
+    ProgressDialog* createLogProgress();
 
     // BBS
     BBLTopbar* topbar() { return m_topbar; }
@@ -287,10 +333,11 @@ public:
 
     void        update_ui_from_settings();
     //BBS
-    void        show_sync_dialog();
+    void        show_sync_dialog(const std::string& user_id);
     void        update_side_preset_ui();
-    void        on_select_default_preset(SimpleEvent& evt);
+    void        on_select_default_preset(wxCommandEvent& evt);
 
+    void        resetFirstGotoMonitor() { m_firstGotoMonitor = true; }
     bool        is_loaded() const { return m_loaded; }
     bool        is_last_input_file() const  { return !m_qs_last_input_file.IsEmpty(); }
     //BBS GUI refactor: remove unused layout new/dlg
@@ -337,11 +384,13 @@ public:
     bool save_project_as(const wxString& filename = wxString());
 
     void        add_to_recent_projects(const wxString& filename);
-    void        get_recent_projects(boost::property_tree::wptree &tree, int images);
+    void        get_recent_projects(boost::property_tree::wptree &tree);
     void        open_recent_project(size_t file_id, wxString const & filename);
     void        remove_recent_project(size_t file_id, wxString const &filename);
+    void        remove_recent_projects(const std::vector<wxString>& filenames);
 
     void        technology_changed();
+
 
     //BBS
     void        load_url(wxString url);
@@ -356,12 +405,17 @@ public:
     void show_device(bool bBBLPrinter);
 
     bool m_is_shutdown{ false };
+	void fit_tab_labels(); // ORCA
 
     PA_Calibration_Dlg* m_pa_calib_dlg{ nullptr };
+    FlowRateCalibrationDialog* m_flow_rate_calib_dlg{ nullptr };
     Temp_Calibration_Dlg* m_temp_calib_dlg{ nullptr };
     MaxVolumetricSpeed_Test_Dlg* m_vol_test_dlg { nullptr };
     VFA_Test_Dlg* m_vfa_test_dlg { nullptr };
     Retraction_Test_Dlg* m_retraction_calib_dlg{ nullptr };
+    Input_Shaping_Freq_Test_Dlg* m_IS_freq_calib_dlg{ nullptr };
+    Input_Shaping_Damp_Test_Dlg* m_IS_damp_calib_dlg{ nullptr };
+    Cornering_Test_Dlg* m_cornering_calib_dlg{ nullptr };
 
     // BBS. Replace title bar and menu bar with top bar.
     BBLTopbar*            m_topbar{ nullptr };
@@ -400,6 +454,10 @@ public:
     SideButton* m_slice_option_btn{ nullptr };
     SideButton* m_print_btn{ nullptr };
     SideButton* m_print_option_btn{ nullptr };
+
+    SidePopup*  m_slice_option_pop_up{ nullptr };
+
+    FilamentGroupPopup* m_filament_group_popup{ nullptr };
     mutable bool          m_slice_enable{ true };
     mutable bool          m_print_enable{ true };
     bool get_enable_slice_status();
@@ -417,6 +475,14 @@ public:
     uint32_t  			m_ulSHChangeNotifyRegister { 0 };
 	static constexpr int WM_USER_MEDIACHANGED { 0x7FFF }; // WM_USER from 0x0400 to 0x7FFF, picking the last one to not interfere with wxWidgets allocation
 #endif // _WIN32
+
+#ifdef __WXGTK__
+    friend class ResizeEdgePanel;
+    ResizeEdgePanel* m_edge_bottom{nullptr};
+    ResizeEdgePanel* m_edge_left{nullptr};
+    ResizeEdgePanel* m_edge_right{nullptr};
+    void update_edge_panels();
+#endif // __WXGTK__
 };
 
 wxDECLARE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);
@@ -425,7 +491,6 @@ wxDECLARE_EVENT(EVT_USER_LOGIN_HANDLE, wxCommandEvent);
 wxDECLARE_EVENT(EVT_CHECK_PRIVACY_VER, wxCommandEvent);
 wxDECLARE_EVENT(EVT_CHECK_PRIVACY_SHOW, wxCommandEvent);
 wxDECLARE_EVENT(EVT_SHOW_IP_DIALOG, wxCommandEvent);
-wxDECLARE_EVENT(EVT_SET_SELECTED_MACHINE, wxCommandEvent);
 wxDECLARE_EVENT(EVT_UPDATE_MACHINE_LIST, wxCommandEvent);
 wxDECLARE_EVENT(EVT_UPDATE_PRESET_CB, SimpleEvent);
 

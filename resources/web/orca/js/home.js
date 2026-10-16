@@ -111,10 +111,10 @@ function HandleStudio(pVal) {
     m_HotModelList = pVal["hits"];
     ShowStaffPick(m_HotModelList);
   } else if (strCmd == "hidden_full_screen_icon") {
-    console.log('hidden_full_screen_icon');
+    console.log("hidden_full_screen_icon");
     // HiddenFullScreenIcon()
   } else if (strCmd == "show_full_screen_icon") {
-    console.log('show_full_screen_icon');
+    console.log("show_full_screen_icon");
     // ShowFullScreenIcon()
   }
 }
@@ -155,54 +155,184 @@ function SetLoginInfo(strAvatar, strName) {
   $("#Login2").css("display", "flex");
 }
 
-var flag= false;
-var flag1= false;
-var flagFullScreen = false
+var flag = false;
+var flag1 = false;
+var flagFullScreen = false;
+var currentVideoClickHandler = null;
+var currentImageClickHandler = null;
+var currentVideoStopPropagationHandler = null;
+var currentImageStopPropagationHandler = null;
+
+function ClearStreamTimer(timerName) {
+  if (window[timerName]) {
+    clearTimeout(window[timerName]);
+    window[timerName] = null;
+  }
+}
+
+function DestroyCurrentStream() {
+  var currentVideo = document.getElementById("video");
+  var currentImage = document.getElementById("videoStream");
+  var currentLoader = document.getElementById("videoLoader");
+  var currentPauseIcon = document.getElementById("zanting");
+
+  ClearStreamTimer("hlsStartupTimer");
+  ClearStreamTimer("hlsHardResetTimer");
+  ClearStreamTimer("hlsShortRetryTimer");
+  ClearStreamTimer("hlsRuntimeRecoveryTimer");
+  ClearStreamTimer("flvStartupTimer");
+  ClearStreamTimer("flvHardResetTimer");
+
+  if (currentVideo && window.hlsCurrentPauseHandler) {
+    currentVideo.removeEventListener("pause", window.hlsCurrentPauseHandler);
+    window.hlsCurrentPauseHandler = null;
+  }
+  if (currentVideo && window.flvCurrentPauseHandler) {
+    currentVideo.removeEventListener("pause", window.flvCurrentPauseHandler);
+    window.flvCurrentPauseHandler = null;
+  }
+  if (currentVideo && window.flvCurrentPlayingHandler) {
+    currentVideo.removeEventListener(
+      "playing",
+      window.flvCurrentPlayingHandler,
+    );
+    window.flvCurrentPlayingHandler = null;
+  }
+
+  if (window.currentHlsPlayer) {
+    try {
+      window.currentHlsPlayer.destroy();
+    } catch (e) {
+      console.warn("HLS destroy warning:", e.message);
+    }
+    window.currentHlsPlayer = null;
+  }
+
+  if (window.currentFlvPlayer) {
+    try {
+      window.currentFlvPlayer.pause();
+    } catch (e) {}
+    try {
+      window.currentFlvPlayer.detachMediaElement();
+    } catch (e) {}
+    try {
+      window.currentFlvPlayer.unload();
+    } catch (e) {}
+    try {
+      window.currentFlvPlayer.destroy();
+    } catch (e) {
+      console.warn("FLV destroy warning:", e.message);
+    }
+    window.currentFlvPlayer = null;
+  }
+
+  window.flvHasFailed = false;
+  streamPaused = false;
+
+  if (currentLoader) currentLoader.style.display = "none";
+  if (currentVideo) {
+    try {
+      currentVideo.pause();
+    } catch (e) {}
+    currentVideo.removeAttribute("src");
+    try {
+      currentVideo.load();
+    } catch (e) {}
+    currentVideo.style.display = "none";
+    currentVideo.style.backgroundImage = "url('hei.svg')";
+    currentVideo.style.backgroundSize = "cover";
+    currentVideo.style.backgroundRepeat = "no-repeat";
+    currentVideo.style.backgroundPosition = "center";
+  }
+  if (currentImage) {
+    currentImage.style.display = "block";
+    currentImage.src = "hei.svg";
+    currentImage.style.backgroundImage = 'url("hei.svg")';
+  }
+  if (currentPauseIcon) currentPauseIcon.style.display = "block";
+}
 
 function SetUrlInfo(strAddress, strLanguage) {
   var handleClickFullScreen = function (event) {
-    if (!event.target.closest('#full_screen_icon')) return;
+    if (!event.target.closest("#full_screen_icon")) return;
     event.stopPropagation();
     event.preventDefault();
-    onFullScreen()
-  }
+    onFullScreen();
+  };
 
-  var full_screen_icon = document.getElementById("full_screen_icon")
-  var videoStream = document.getElementById("videoStream")
+  var full_screen_icon = document.getElementById("full_screen_icon");
+  var videoStream = document.getElementById("videoStream");
 
-  if (!flagFullScreen) {
+  if (!flagFullScreen && full_screen_icon) {
     flagFullScreen = true;
-    full_screen_icon.removeEventListener("click", handleClickFullScreen, true)
-    full_screen_icon.addEventListener("click", handleClickFullScreen, true)
+    full_screen_icon.removeEventListener("click", handleClickFullScreen, true);
+    full_screen_icon.addEventListener("click", handleClickFullScreen, true);
   }
-  
 
-  video.addEventListener('click', function (e) {
-    e.stopPropagation();
-  });
-  videoStream.addEventListener('click', function (e) {
-    e.stopPropagation();
-  });
+  if (!currentVideoStopPropagationHandler) {
+    currentVideoStopPropagationHandler = function (e) {
+      e.stopPropagation();
+    };
+    video.addEventListener("click", currentVideoStopPropagationHandler);
+  }
+  if (!currentImageStopPropagationHandler && videoStream) {
+    currentImageStopPropagationHandler = function (e) {
+      e.stopPropagation();
+    };
+    videoStream.addEventListener("click", currentImageStopPropagationHandler);
+  }
 
-    window.strAddress = strAddress;
+  // >>> 临时测试：把 m3u8 后缀替换为 flv 测试 flv 流，测完删除此 if 块 <<<
+  // if (/\.m3u8(\?|$|\/|#)/i.test(strAddress)) {
+  //   strAddress = strAddress.replace(/\.m3u8/i, ".flv");
+  //   console.log("[TEST] m3u8 后缀已替换为 flv:", strAddress);
+  // }
+  // if (/\.m3u8(\?|$|\/|#)/i.test(strAddress)) {
+  //   strAddress = "http://liveplay.flashforge.com/live/test_stream_001.flv";
+  //   console.log("[TEST] m3u8 后缀已替换为 flv:", strAddress);
+  // }
+  // <<< 临时测试结束 >>>
+
+  // Mac 平台收到 flv 流时改用 m3u8 播放：Safari 原生支持 HLS，可绕开
+  // flv.js 在 file:// 下 MSE blob:null 被 Safari 拦截的问题
+  var _isMacPlatform = /macintosh|mac os x/i.test(navigator.userAgent);
+  if (
+    _isMacPlatform &&
+    /\.flv(\?|$|\/|#)/i.test(strAddress) &&
+    video.canPlayType("application/vnd.apple.mpegurl")
+  ) {
+    strAddress = strAddress.replace(/\.flv/i, ".m3u8");
+    console.log("[Mac] flv 已改用 m3u8 播放:", strAddress);
+  }
+
+  if (window.strAddress && window.strAddress !== strAddress) {
+    DestroyCurrentStream();
+  }
+  window.strAddress = strAddress;
   $("#url-studio").text(strAddress);
   $("#url-studio-r").text(strLanguage);
-  var loader = document.getElementById('videoLoader');
+  var loader = document.getElementById("videoLoader");
   let lang = strAddress;
-
+  console.log(lang);
   // var platform = window.navigator.platform;
   // var userAgent = window.navigator.userAgent;
 
   var point = document.getElementById("point");
   var point1 = document.getElementById("point1");
-  
 
   const isMac = /macintosh|mac os x/i.test(navigator.userAgent);
 
-  let zting = document.querySelector('#zanting')
+  let zting = document.querySelector("#zanting");
+  // 匹配 .m3u8 / .flv 后跟 ?、/、# 或字符串结尾，兼容带签名/参数的流地址
+  function isM3u8Url(url) {
+    return /\.m3u8(\?|$|\/|#)/i.test(url);
+  }
+  function isFlvUrl(url) {
+    return /\.flv(\?|$|\/|#)/i.test(url);
+  }
   if (lang) {
     // full_screen_icon.style.display = "block";
-    if (lang.endsWith(".m3u8")) {
+    if (isM3u8Url(lang) || isFlvUrl(lang)) {
       video.style.display = "block";
       videoStreamImg.style.display = "none";
       video.style.backgroundImage = "url('hei.svg')";
@@ -213,7 +343,59 @@ function SetUrlInfo(strAddress, strLanguage) {
       var handleClick = function (event) {
         event.stopPropagation();
         event.preventDefault();
-        if (!streamPaused) {
+
+        // FLV 流：暂停/重播逻辑
+        //  正在播放时点击 → 暂停（显示占位图）
+        //  超时/失败回退后点击 → 重播
+        var flvJustPaused = false;
+        if (streamPaused || window.currentFlvPlayer || window.flvHasFailed) {
+          var currentAddr = document.getElementById("url-studio").innerHTML;
+          if (isFlvUrl(currentAddr)) {
+            // 判断是"正在播放"还是"失败回退"：有播放器且非失败状态 = 正在播放
+            flvJustPaused = window.currentFlvPlayer && !window.flvHasFailed;
+            if (window.currentFlvPlayer) {
+              try {
+                window.currentFlvPlayer.pause();
+                window.currentFlvPlayer.detachMediaElement();
+                window.currentFlvPlayer.unload();
+                window.currentFlvPlayer.destroy();
+              } catch (e) {
+                console.warn("FLV destroy warning:", e.message);
+              }
+              window.currentFlvPlayer = null;
+            }
+            if (window.flvHardResetTimer) {
+              clearTimeout(window.flvHardResetTimer);
+              window.flvHardResetTimer = null;
+            }
+            if (window.flvStartupTimer) {
+              clearTimeout(window.flvStartupTimer);
+              window.flvStartupTimer = null;
+            }
+            if (window.flvCurrentPauseHandler) {
+              video.removeEventListener("pause", window.flvCurrentPauseHandler);
+              window.flvCurrentPauseHandler = null;
+            }
+            if (window.flvCurrentPlayingHandler) {
+              video.removeEventListener(
+                "playing",
+                window.flvCurrentPlayingHandler,
+              );
+              window.flvCurrentPlayingHandler = null;
+            }
+            video.src = "";
+            video.style.backgroundImage = "url('hei.svg')";
+            video.style.backgroundSize = "cover";
+            video.style.backgroundRepeat = "no-repeat";
+            video.style.backgroundPosition = "center";
+            var zanting = document.getElementById("zanting");
+            zanting.style.display = "block";
+            window.flvHasFailed = false;
+            streamPaused = false;
+          }
+        }
+
+        if (!streamPaused && !flvJustPaused) {
           OnGetUrl();
           setTimeout(function () {
             var element = document.getElementById("url-studio");
@@ -223,20 +405,203 @@ function SetUrlInfo(strAddress, strLanguage) {
             var element1 = document.getElementById("url-studio-r");
             var content1 = element1.innerHTML;
             lang1 = content1;
-            if (lang === '设备离线了') {
-              if (lang1 === 'zh_CN') {
-                point.style.display = 'block'
-                setTimeout(function() {
-                  point.style.display = 'none'
-                },3000)
-              } else if (lang1 === 'en') {
-                point1.style.display = 'block'
-                setTimeout(function() {
-                  point1.style.display = 'none'
-                },3000)
+            if (lang === "设备离线了") {
+              if (lang1 === "zh_CN") {
+                point.style.display = "block";
+                setTimeout(function () {
+                  point.style.display = "none";
+                }, 3000);
+              } else if (lang1 === "en") {
+                point1.style.display = "block";
+                setTimeout(function () {
+                  point1.style.display = "none";
+                }, 3000);
               }
             } else {
-              if (isMac) {
+              if (
+                isFlvUrl(lang) &&
+                typeof flvjs !== "undefined" &&
+                flvjs.isSupported()
+              ) {
+                video.style.backgroundImage = "none";
+                var zanting = document.getElementById("zanting");
+                zanting.style.display = "none";
+
+                if (!streamPaused) {
+                  if (window.flvHardResetTimer) {
+                    clearTimeout(window.flvHardResetTimer);
+                    window.flvHardResetTimer = null;
+                  }
+                  if (window.flvCurrentPauseHandler) {
+                    video.removeEventListener(
+                      "pause",
+                      window.flvCurrentPauseHandler,
+                    );
+                    window.flvCurrentPauseHandler = null;
+                  }
+
+                  var flvIsVideoStarting = false;
+                  var flvHasFinalFallback = false;
+
+                  function flvRollbackToPlaceholder() {
+                    if (flvHasFinalFallback) return;
+                    flvHasFinalFallback = true;
+                    window.flvHasFailed = true;
+                    loader.style.display = "none";
+                    if (window.flvHardResetTimer) {
+                      clearTimeout(window.flvHardResetTimer);
+                      window.flvHardResetTimer = null;
+                    }
+                    if (window.flvStartupTimer) {
+                      clearTimeout(window.flvStartupTimer);
+                      window.flvStartupTimer = null;
+                    }
+                    if (window.flvCurrentPauseHandler) {
+                      video.removeEventListener(
+                        "pause",
+                        window.flvCurrentPauseHandler,
+                      );
+                      window.flvCurrentPauseHandler = null;
+                    }
+                    if (window.currentFlvPlayer) {
+                      try {
+                        window.currentFlvPlayer.pause();
+                        window.currentFlvPlayer.detachMediaElement();
+                        window.currentFlvPlayer.unload();
+                        window.currentFlvPlayer.destroy();
+                      } catch (e) {
+                        console.warn("FLV destroy warning:", e.message);
+                      }
+                      window.currentFlvPlayer = null;
+                    }
+                    video.src = "";
+                    video.style.backgroundImage = "url('hei.svg')";
+                    video.style.backgroundSize = "cover";
+                    video.style.backgroundRepeat = "no-repeat";
+                    video.style.backgroundPosition = "center";
+                    var zanting = document.getElementById("zanting");
+                    zanting.style.display = "block";
+                    streamPaused = false;
+                    if (lang1 === "zh_CN") {
+                      point.style.display = "block";
+                      setTimeout(function () {
+                        point.style.display = "none";
+                      }, 3000);
+                    } else if (lang1 === "en") {
+                      point1.style.display = "block";
+                      setTimeout(function () {
+                        point1.style.display = "none";
+                      }, 3000);
+                    }
+                  }
+
+                  // 安全销毁 FLV 播放器，避免 destroy 后异步 pump 访问已移除的 SourceBuffer 报错
+                  function safeDestroyFlvPlayer() {
+                    var p = window.currentFlvPlayer;
+                    if (!p) return;
+                    window.currentFlvPlayer = null;
+                    try {
+                      p.pause();
+                    } catch (e) {}
+                    try {
+                      p.detachMediaElement();
+                    } catch (e) {}
+                    try {
+                      p.unload();
+                    } catch (e) {}
+                    try {
+                      p.destroy();
+                    } catch (e) {
+                      console.warn("FLV destroy warning:", e.message);
+                    }
+                  }
+
+                  function startFlvPlayback() {
+                    if (flvHasFinalFallback) return;
+                    if (window.currentFlvPlayer) {
+                      safeDestroyFlvPlayer();
+                    }
+                    var flvPlayer = flvjs.createPlayer({
+                      type: "flv",
+                      url: lang,
+                      isLive: true,
+                    });
+                    window.currentFlvPlayer = flvPlayer;
+                    flvPlayer.attachMediaElement(video);
+                    flvPlayer.load();
+
+                    flvPlayer.on(flvjs.Events.ERROR, function () {
+                      if (flvHasFinalFallback) return;
+                      flvRollbackToPlaceholder();
+                    });
+
+                    video.play().catch(function (e) {
+                      console.error("FLV播放失败:", e);
+                    });
+                  }
+
+                  if (video.readyState < 2) {
+                    loader.style.display = "block";
+                    startFlvPlayback();
+                  }
+
+                  function onFlvPlaying(event) {
+                    event.stopPropagation();
+                    flvIsVideoStarting = true;
+                    loader.style.display = "none";
+                  }
+                  function onFlvPause(event) {
+                    event.stopPropagation();
+                    loader.style.display = "none";
+                  }
+
+                  video.addEventListener("playing", onFlvPlaying, {
+                    once: true,
+                  });
+                  window.flvCurrentPlayingHandler = onFlvPlaying;
+                  window.flvCurrentPauseHandler = onFlvPause;
+                  video.addEventListener("pause", onFlvPause);
+
+                  window.flvStartupTimer = setTimeout(function () {
+                    window.flvStartupTimer = null;
+                    if (!flvIsVideoStarting) {
+                      flvRollbackToPlaceholder();
+                    }
+                  }, 30000);
+
+                  window.flvHardResetTimer = setTimeout(function () {
+                    window.flvHardResetTimer = null;
+                    if (flvHasFinalFallback) return;
+                    if (window.flvCurrentPauseHandler) {
+                      video.removeEventListener(
+                        "pause",
+                        window.flvCurrentPauseHandler,
+                      );
+                      window.flvCurrentPauseHandler = null;
+                    }
+                    if (window.currentFlvPlayer) {
+                      try {
+                        window.currentFlvPlayer.pause();
+                        window.currentFlvPlayer.detachMediaElement();
+                        window.currentFlvPlayer.unload();
+                        window.currentFlvPlayer.destroy();
+                      } catch (e) {
+                        console.warn("FLV destroy warning:", e.message);
+                      }
+                      window.currentFlvPlayer = null;
+                    }
+                    video.src = "";
+                    video.style.backgroundImage = "url('hei.svg')";
+                    video.style.backgroundSize = "cover";
+                    video.style.backgroundRepeat = "no-repeat";
+                    video.style.backgroundPosition = "center";
+                    var zanting = document.getElementById("zanting");
+                    zanting.style.display = "block";
+                    streamPaused = false;
+                  }, 300000);
+                  streamPaused = true;
+                }
+              } else if (isMac) {
                 if (video.canPlayType("application/vnd.apple.mpegurl")) {
                   if (!streamPaused) {
                     // 对于原生支持 HLS 的平台（如 Safari），直接播放
@@ -244,62 +609,61 @@ function SetUrlInfo(strAddress, strLanguage) {
                     var zanting = document.getElementById("zanting");
                     zanting.style.display = "none";
                     video.src = lang;
-    
+
                     // 当视频被点击，检查其播放状态
                     if (video.readyState < 2) {
-                        // 如果视频未加载足够的数据，则显示加载动画
-                        loader.style.display = 'block';
-                        // 尝试播放视频
-                        video.play().catch(function(e) {
-                            console.error("播放失败:", e);
-                        });
+                      // 如果视频未加载足够的数据，则显示加载动画
+                      loader.style.display = "block";
+                      // 尝试播放视频
+                      video.play().catch(function (e) {
+                        console.error("播放失败:", e);
+                      });
                     }
-  
+
                     // 设置一个标志来跟踪视频是否开始播放
                     var isVideoStarting = false;
-                    
+
                     function hideLoader(event) {
                       event.stopPropagation();
                       isVideoStarting = true;
-                      loader.style.display = 'none';
+                      loader.style.display = "none";
                     }
-    
-                  // 当视频开始播放时，隐藏加载动画
-                  video.addEventListener('playing', hideLoader);
-    
-                  // 视频暂停时，不显示加载动画
-                  video.addEventListener('pause', hideLoader);
-                
-                  // 视频发生错误时显示加载动画
-                  video.addEventListener('error', hideLoader);
-  
-                  // 设置一个超时时间，在30秒后检查视频是否开始播放
-                  setTimeout(function() {
-                    if (!isVideoStarting) {
-                      loader.style.display = 'none';
-                      video.src = "";
-                      video.style.backgroundImage = "url('hei.svg')";
-                      video.style.backgroundSize = "cover";
-                      video.style.backgroundRepeat = "no-repeat";
-                      video.style.backgroundPosition = "center";
-                      var zanting = document.getElementById("zanting");
-                      zanting.style.display = "block";
-                      streamPaused = false;
-                      if (lang1 === 'zh_CN') {
-                        point.style.display = 'block'
-                        setTimeout(function() {
-                          point.style.display = 'none'
-                        },3000)
-                      } else if (lang1 === 'en') {
-                        point1.style.display = 'block'
-                        setTimeout(function() {
-                          point1.style.display = 'none'
-                        },3000)
+
+                    // 当视频开始播放时，隐藏加载动画
+                    video.addEventListener("playing", hideLoader);
+
+                    // 视频暂停时，不显示加载动画
+                    video.addEventListener("pause", hideLoader);
+
+                    // 视频发生错误时显示加载动画
+                    video.addEventListener("error", hideLoader);
+
+                    // 设置一个超时时间，在30秒后检查视频是否开始播放
+                    setTimeout(function () {
+                      if (!isVideoStarting) {
+                        loader.style.display = "none";
+                        video.src = "";
+                        video.style.backgroundImage = "url('hei.svg')";
+                        video.style.backgroundSize = "cover";
+                        video.style.backgroundRepeat = "no-repeat";
+                        video.style.backgroundPosition = "center";
+                        var zanting = document.getElementById("zanting");
+                        zanting.style.display = "block";
+                        streamPaused = false;
+                        if (lang1 === "zh_CN") {
+                          point.style.display = "block";
+                          setTimeout(function () {
+                            point.style.display = "none";
+                          }, 3000);
+                        } else if (lang1 === "en") {
+                          point1.style.display = "block";
+                          setTimeout(function () {
+                            point1.style.display = "none";
+                          }, 3000);
+                        }
                       }
-                    }
-                  }, 30000); // 30秒超时时间
-  
-  
+                    }, 30000); // 30秒超时时间
+
                     setTimeout(function () {
                       video.src = "";
                       video.style.backgroundImage = "url('hei.svg')";
@@ -319,82 +683,54 @@ function SetUrlInfo(strAddress, strLanguage) {
                   video.style.backgroundImage = "none";
                   var zanting = document.getElementById("zanting");
                   zanting.style.display = "none";
-                  var hls = new Hls();
-                  // 绑定视频流地址
-                  hls.loadSource(lang);
-                  // 绑定 video 容器
-                  hls.attachMedia(video);
+
                   if (!streamPaused) {
-                    // 当视频被点击，检查其播放状态
-                    if (video.readyState < 2) {
-                        // 如果视频未加载足够的数据，则显示加载动画
-                        loader.style.display = 'block';
-                        // setTimeout(function() {
-                        //   loader.style.display = 'none';
-                        //   video.src = "";
-                        //   video.style.backgroundImage = "url('hei.svg')";
-                        //   video.style.backgroundSize = "cover";
-                        //   video.style.backgroundRepeat = "no-repeat";
-                        //   video.style.backgroundPosition = "center";
-                        //   var zanting = document.getElementById("zanting");
-                        //   zanting.style.display = "block";
-                        //   streamPaused = false;
-                        //   point.style.display = 'block'
-                        //   setTimeout(function() {
-                        //     point.style.display = 'none'
-                        //   },3000)
-                        // },30000)
-                        // 尝试播放视频
-                        video.play().catch(function(e) {
-                            console.error("播放失败:", e);
-                        });
+                    // 清除上一次 session 残留的 5 分钟定时器，防止跨 session 干扰
+                    if (window.hlsHardResetTimer) {
+                      clearTimeout(window.hlsHardResetTimer);
+                      window.hlsHardResetTimer = null;
                     }
-  
-                    // 设置一个标志来跟踪视频是否开始播放
+                    // 清除上一次 session 残留的 pause 监听器
+                    if (window.hlsCurrentPauseHandler) {
+                      video.removeEventListener(
+                        "pause",
+                        window.hlsCurrentPauseHandler,
+                      );
+                      window.hlsCurrentPauseHandler = null;
+                    }
+
+                    var maxShortRetry = 5;
+                    var shortRetryDelay = 4000;
+                    var shortRetryCount = 0;
+                    var maxRuntimeRetry = 6;
+                    var runtimeRetryDelay = 3000;
+                    var runtimeRetryCount = 0;
+                    var runtimeRetryPending = false;
                     var isVideoStarting = false;
-                    
-                    function hideLoader(event) {
-                      event.stopPropagation();
-                      event.preventDefault();
-                      isVideoStarting = true;
-                      loader.style.display = 'none';
-                    }
-    
-                    // 当视频开始播放时，隐藏加载动画
-                    video.addEventListener('playing', hideLoader);
-                    // 视频暂停时，不显示加载动画
-                    video.addEventListener('pause', hideLoader);
-                
-                    // 视频发生错误时显示加载动画
-                    video.addEventListener('error', hideLoader);
-  
-                    // 设置一个超时时间，在30秒后检查视频是否开始播放
-                    setTimeout(function() {
-                      if (!isVideoStarting) {
-                        loader.style.display = 'none';
-                        video.src = "";
-                        video.style.backgroundImage = "url('hei.svg')";
-                        video.style.backgroundSize = "cover";
-                        video.style.backgroundRepeat = "no-repeat";
-                        video.style.backgroundPosition = "center";
-                        var zanting = document.getElementById("zanting");
-                        zanting.style.display = "block";
-                        streamPaused = false;
-                        if (lang1 === 'zh_CN') {
-                          point.style.display = 'block'
-                          setTimeout(function() {
-                            point.style.display = 'none'
-                          },3000)
-                        } else if (lang1 === 'en') {
-                          point1.style.display = 'block'
-                          setTimeout(function() {
-                            point1.style.display = 'none'
-                          },3000)
-                        }
+                    var hasFinalFallback = false;
+
+                    function rollbackToPlaceholder() {
+                      if (hasFinalFallback) return;
+                      hasFinalFallback = true;
+                      loader.style.display = "none";
+                      if (window.hlsHardResetTimer) {
+                        clearTimeout(window.hlsHardResetTimer);
+                        window.hlsHardResetTimer = null;
                       }
-                    }, 30000); // 30秒超时时间
-    
-                    setTimeout(function () {
+                      ClearStreamTimer("hlsStartupTimer");
+                      ClearStreamTimer("hlsShortRetryTimer");
+                      ClearStreamTimer("hlsRuntimeRecoveryTimer");
+                      if (window.hlsCurrentPauseHandler) {
+                        video.removeEventListener(
+                          "pause",
+                          window.hlsCurrentPauseHandler,
+                        );
+                        window.hlsCurrentPauseHandler = null;
+                      }
+                      if (window.currentHlsPlayer) {
+                        window.currentHlsPlayer.destroy();
+                        window.currentHlsPlayer = null;
+                      }
                       video.src = "";
                       video.style.backgroundImage = "url('hei.svg')";
                       video.style.backgroundSize = "cover";
@@ -403,7 +739,182 @@ function SetUrlInfo(strAddress, strLanguage) {
                       var zanting = document.getElementById("zanting");
                       zanting.style.display = "block";
                       streamPaused = false;
-                    }, 300000); // 10分钟后暂停，10分钟 = 600000毫秒
+                      if (lang1 === "zh_CN") {
+                        point.style.display = "block";
+                        setTimeout(function () {
+                          point.style.display = "none";
+                        }, 3000);
+                      } else if (lang1 === "en") {
+                        point1.style.display = "block";
+                        setTimeout(function () {
+                          point1.style.display = "none";
+                        }, 3000);
+                      }
+                    }
+
+                    function scheduleRuntimeRecovery(hls) {
+                      if (hasFinalFallback || runtimeRetryPending) return;
+                      if (runtimeRetryCount >= maxRuntimeRetry) {
+                        rollbackToPlaceholder();
+                        return;
+                      }
+
+                      runtimeRetryPending = true;
+                      runtimeRetryCount++;
+                      loader.style.display = "block";
+
+                      window.hlsRuntimeRecoveryTimer = setTimeout(function () {
+                        window.hlsRuntimeRecoveryTimer = null;
+                        runtimeRetryPending = false;
+                        if (hasFinalFallback) return;
+
+                        if (!window.currentHlsPlayer) {
+                          startHlsPlayback();
+                          return;
+                        }
+
+                        try {
+                          var activeHls = window.currentHlsPlayer;
+                          if (!activeHls) {
+                            startHlsPlayback();
+                            return;
+                          }
+                          activeHls.startLoad(-1);
+                          video.play().catch(function (e) {
+                            console.error("播放失败:", e);
+                          });
+                        } catch (e) {
+                          startHlsPlayback();
+                        }
+                      }, runtimeRetryDelay);
+                    }
+
+                    function startHlsPlayback() {
+                      if (hasFinalFallback) return;
+                      if (window.currentHlsPlayer) {
+                        window.currentHlsPlayer.destroy();
+                        window.currentHlsPlayer = null;
+                      }
+                      var hls = new Hls();
+                      window.currentHlsPlayer = hls;
+                      hls.loadSource(lang);
+                      hls.attachMedia(video);
+
+                      hls.on(Hls.Events.ERROR, function (eventName, data) {
+                        if (!data || hasFinalFallback) return;
+
+                        var isNetworkError =
+                          data.type === Hls.ErrorTypes.NETWORK_ERROR;
+                        var isMediaError =
+                          data.type === Hls.ErrorTypes.MEDIA_ERROR;
+
+                        // 起播前错误：沿用短期重试
+                        if (!isVideoStarting && data.fatal) {
+                          if (shortRetryCount < maxShortRetry) {
+                            shortRetryCount++;
+                            ClearStreamTimer("hlsShortRetryTimer");
+                            window.hlsShortRetryTimer = setTimeout(function () {
+                              window.hlsShortRetryTimer = null;
+                              startHlsPlayback();
+                            }, shortRetryDelay);
+                            return;
+                          }
+                          rollbackToPlaceholder();
+                          return;
+                        }
+
+                        // 已起播后的网络抖动/丢流：执行运行期恢复
+                        if (isVideoStarting && isNetworkError) {
+                          scheduleRuntimeRecovery(hls);
+                          return;
+                        }
+
+                        // 媒体解码类错误尝试恢复
+                        if (isVideoStarting && isMediaError && data.fatal) {
+                          try {
+                            hls.recoverMediaError();
+                          } catch (e) {
+                            rollbackToPlaceholder();
+                          }
+                          return;
+                        }
+
+                        if (data.fatal) rollbackToPlaceholder();
+                      });
+
+                      video.play().catch(function (e) {
+                        console.error("播放失败:", e);
+                      });
+                    }
+
+                    // 当视频被点击，检查其播放状态
+                    if (video.readyState < 2) {
+                      // 如果视频未加载足够的数据，则显示加载动画
+                      loader.style.display = "block";
+                      startHlsPlayback();
+                    } else {
+                      // 已有数据（如暂停后恢复），直接恢复播放
+                      if (window.currentHlsPlayer) {
+                        try { window.currentHlsPlayer.startLoad(-1); } catch (e) {}
+                      }
+                      video.play().catch(function (e) {
+                        console.error("播放失败:", e);
+                      });
+                    }
+
+                    function onPlaying(event) {
+                      event.stopPropagation();
+                      isVideoStarting = true;
+                      runtimeRetryCount = 0;
+                      runtimeRetryPending = false;
+                      loader.style.display = "none";
+                    }
+
+                    function onPause(event) {
+                      event.stopPropagation();
+                      loader.style.display = "none";
+                    }
+
+                    // 当视频开始播放时，隐藏加载动画
+                    video.addEventListener("playing", onPlaying, {
+                      once: true,
+                    });
+                    // 视频暂停时，不显示加载动画（用全局引用，方便 rollback 时清除）
+                    window.hlsCurrentPauseHandler = onPause;
+                    video.addEventListener("pause", onPause);
+
+                    // 设置一个超时时间，在30秒后检查视频是否开始播放
+                    window.hlsStartupTimer = setTimeout(function () {
+                      window.hlsStartupTimer = null;
+                      if (!isVideoStarting) {
+                        rollbackToPlaceholder();
+                      }
+                    }, 30000); // 30秒超时时间
+
+                    // 5分钟强制停流，用全局引用防止跨 session 干扰
+                    window.hlsHardResetTimer = setTimeout(function () {
+                      window.hlsHardResetTimer = null;
+                      if (hasFinalFallback) return; // rollback 已经处理过，无需重复
+                      if (window.hlsCurrentPauseHandler) {
+                        video.removeEventListener(
+                          "pause",
+                          window.hlsCurrentPauseHandler,
+                        );
+                        window.hlsCurrentPauseHandler = null;
+                      }
+                      if (window.currentHlsPlayer) {
+                        window.currentHlsPlayer.destroy();
+                        window.currentHlsPlayer = null;
+                      }
+                      video.src = "";
+                      video.style.backgroundImage = "url('hei.svg')";
+                      video.style.backgroundSize = "cover";
+                      video.style.backgroundRepeat = "no-repeat";
+                      video.style.backgroundPosition = "center";
+                      var zanting = document.getElementById("zanting");
+                      zanting.style.display = "block";
+                      streamPaused = false;
+                    }, 300000); // 5分钟后强制停流
                     streamPaused = true;
                   }
                 }
@@ -411,26 +922,32 @@ function SetUrlInfo(strAddress, strLanguage) {
             }
           }, 10);
         } else {
-          // video.pause();
-          video.src = ''
-          video.style.backgroundImage = "url('hei.svg')";
-          video.style.backgroundSize = "cover";
-          video.style.backgroundRepeat = "no-repeat";
-          video.style.backgroundPosition = "center";
+          // 暂停视频：停在最后一帧，不覆盖背景图
+          if (window.currentHlsPlayer) {
+            try { window.currentHlsPlayer.stopLoad(); } catch (e) {}
+          }
+          video.pause();
           var zanting = document.getElementById("zanting");
           zanting.style.display = "block";
           streamPaused = false;
         }
       };
 
-	  if (!flag) {
+      if (currentImageClickHandler) {
+        for (let i = 0; i < imgs.length; i++) {
+          imgs[i].removeEventListener("click", currentImageClickHandler);
+        }
+        currentImageClickHandler = null;
+        flag1 = false;
+      }
+      if (currentVideoClickHandler) {
+        zting.removeEventListener("click", currentVideoClickHandler);
+        video.removeEventListener("click", currentVideoClickHandler);
+      }
+      currentVideoClickHandler = handleClick;
+      zting.addEventListener("click", currentVideoClickHandler);
+      video.addEventListener("click", currentVideoClickHandler);
       flag = true;
-      zting.removeEventListener("click", handleClick);
-      zting.addEventListener("click", handleClick);
-		  video.removeEventListener("click", handleClick);
-		  video.addEventListener("click", handleClick);
-	  }
-      
     } else {
       // flag = false;
       // alert(flag)
@@ -450,20 +967,20 @@ function SetUrlInfo(strAddress, strLanguage) {
             var element1 = document.getElementById("url-studio-r");
             var content1 = element1.innerHTML;
             lang1 = content1;
-            if (lang === '设备离线了') {
-              if (lang1 === 'zh_CN') {
-                point.style.display = 'block'
-                setTimeout(function() {
-                  point.style.display = 'none'
-                },3000)
-              } else if (lang1 === 'en') {
-                point1.style.display = 'block'
-                setTimeout(function() {
-                  point1.style.display = 'none'
-                },3000)
+            if (lang === "设备离线了") {
+              if (lang1 === "zh_CN") {
+                point.style.display = "block";
+                setTimeout(function () {
+                  point.style.display = "none";
+                }, 3000);
+              } else if (lang1 === "en") {
+                point1.style.display = "block";
+                setTimeout(function () {
+                  point1.style.display = "none";
+                }, 3000);
               }
             } else {
-              loader.style.display = 'block'
+              loader.style.display = "block";
               // alert(lang)
               videoStreamImg.src = "";
               videoStreamImg.style.backgroundImage = 'url("")';
@@ -491,46 +1008,49 @@ function SetUrlInfo(strAddress, strLanguage) {
               // 设置一个标志来跟踪视频是否开始播放
               var isVideoStarting = false;
 
-              videoStream.addEventListener('load', function(event) {
+              videoStream.addEventListener(
+                "load",
+                function (event) {
                   event.stopPropagation();
                   event.preventDefault();
                   isVideoStarting = true;
                   // 隐藏加载动画
-                  videoLoader.style.display = 'none';
-              }, { once: true }); // 使用 { once: true } 参数，确保事件只触发一次
-  
-              videoStream.addEventListener('error', function(event) {
-                  event.stopPropagation();
-                  event.preventDefault();
-                  isVideoStarting = true;
-                  // 隐藏加载动画
-                  videoLoader.style.display = 'none';
+                  videoLoader.style.display = "none";
+                },
+                { once: true },
+              ); // 使用 { once: true } 参数，确保事件只触发一次
+
+              videoStream.addEventListener("error", function (event) {
+                event.stopPropagation();
+                event.preventDefault();
+                isVideoStarting = true;
+                // 隐藏加载动画
+                videoLoader.style.display = "none";
               });
 
               // 设置一个超时时间，在30秒后检查视频是否开始播放
-              setTimeout(function() {
+              setTimeout(function () {
                 if (!isVideoStarting) {
-                  loader.style.display = 'none';
-                  videoStreamImg.src = ''
-                  videoStreamImg.src = 'hei.svg'
-                  var zanting = document.getElementById("zanting")
-                  zanting.style.display = 'block'
-                  videoStreamImg.style.backgroundImage = 'url("hei.svg")'
+                  loader.style.display = "none";
+                  videoStreamImg.src = "";
+                  videoStreamImg.src = "hei.svg";
+                  var zanting = document.getElementById("zanting");
+                  zanting.style.display = "block";
+                  videoStreamImg.style.backgroundImage = 'url("hei.svg")';
                   streamPaused = false;
-                  if (lang1 === 'zh_CN') {
-                    point.style.display = 'block'
-                    setTimeout(function() {
-                      point.style.display = 'none'
-                    },3000)
-                  } else if (lang1 === 'en') {
-                    point1.style.display = 'block'
-                    setTimeout(function() {
-                      point1.style.display = 'none'
-                    },3000)
+                  if (lang1 === "zh_CN") {
+                    point.style.display = "block";
+                    setTimeout(function () {
+                      point.style.display = "none";
+                    }, 3000);
+                  } else if (lang1 === "en") {
+                    point1.style.display = "block";
+                    setTimeout(function () {
+                      point1.style.display = "none";
+                    }, 3000);
                   }
                 }
               }, 30000); // 30秒超时时间
-
 
               streamPaused = true;
               setTimeout(function () {
@@ -548,15 +1068,24 @@ function SetUrlInfo(strAddress, strLanguage) {
           videoStreamImg.style.backgroundImage = 'url("hei.svg")';
           streamPaused = false;
         }
+      };
+
+      if (currentVideoClickHandler) {
+        zting.removeEventListener("click", currentVideoClickHandler);
+        video.removeEventListener("click", currentVideoClickHandler);
+        currentVideoClickHandler = null;
+        flag = false;
       }
-      
-      if (!flag1) {
-        flag1 = true;
+      if (currentImageClickHandler) {
         for (let i = 0; i < imgs.length; i++) {
-          imgs[i].removeEventListener("click", handleClicktr);
-          imgs[i].addEventListener("click", handleClicktr);
+          imgs[i].removeEventListener("click", currentImageClickHandler);
         }
       }
+      currentImageClickHandler = handleClicktr;
+      for (let i = 0; i < imgs.length; i++) {
+        imgs[i].addEventListener("click", currentImageClickHandler);
+      }
+      flag1 = true;
     }
   } else {
     video.style.display = "none";
@@ -573,19 +1102,21 @@ function SetUrlInfo(strAddress, strLanguage) {
 }
 
 function HiddenFullScreenIcon() {
-  var full_screen_icon = document.getElementById("full_screen_icon")
+  var full_screen_icon = document.getElementById("full_screen_icon");
   if (full_screen_icon) {
     full_screen_icon.style.display = "none";
   }
 }
 function ShowFullScreenIcon() {
-  var full_screen_icon = document.getElementById("full_screen_icon")
+  var full_screen_icon = document.getElementById("full_screen_icon");
   if (full_screen_icon) {
     full_screen_icon.style.display = "block";
   }
 }
 
 function SetClose() {
+  DestroyCurrentStream();
+  window.strAddress = "";
   $("#url-studio").text("设备离线了");
 }
 
@@ -927,14 +1458,12 @@ function OpenOneStaffPickModel(ModelID) {
   SendWXMessage(JSON.stringify(tSend));
 }
 
-
 function onFullScreen() {
   var tSend = {};
   tSend["sequence_id"] = Math.round(new Date() / 1000);
   tSend["command"] = "full_screen";
   SendWXMessage(JSON.stringify(tSend));
 }
-
 
 //---------------Global-----------------
 window.postMessage = HandleStudio;

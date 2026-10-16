@@ -15,6 +15,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoFlatten.hpp"
 //#include "slic3r/GUI/Gizmos/GLGizmoSlaSupports.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoFdmSupports.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoFuzzySkin.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoBrimEars.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCut.hpp"
 //#include "slic3r/GUI/Gizmos/GLGizmoFaceDetector.hpp"
@@ -62,9 +63,11 @@ std::vector<size_t> GLGizmosManager::get_selectable_idxs() const
     out.reserve(m_gizmos.size());
     if (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView) {
         for (size_t i = 0; i < m_gizmos.size(); ++i)
-            if (m_gizmos[i]->get_sprite_id() == (unsigned int) Measure ||
+            if (m_gizmos[i]->get_sprite_id() == (unsigned int) Move ||
+                m_gizmos[i]->get_sprite_id() == (unsigned int) Rotate ||
+                m_gizmos[i]->get_sprite_id() == (unsigned int) Measure ||
                 m_gizmos[i]->get_sprite_id() == (unsigned int) Assembly ||
-                m_gizmos[i]->get_sprite_id() == (unsigned int) MmuSegmentation)
+                m_gizmos[i]->get_sprite_id() == (unsigned int) MmSegmentation)
                 out.push_back(i);
     }
     else {
@@ -155,8 +158,11 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case(EType::Emboss):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg");
             break;
-        case(EType::MmuSegmentation):
+        case(EType::MmSegmentation):
             gizmo->set_icon_filename(m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg");
+            break;
+        case(EType::FuzzySkin):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg");
             break;
         case(EType::MeshBoolean):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_meshboolean_dark.svg" : "toolbar_meshboolean.svg");
@@ -167,6 +173,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::Assembly):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_assembly_dark.svg" : "toolbar_assembly.svg");
             break;
+        case (EType::BrimEars):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg");
+            break;
         }
 
     }
@@ -174,8 +183,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
 
 bool GLGizmosManager::init()
 {
-    bool result = init_icon_textures();
-    if (!result) return result;
+    if (!m_gizmos.empty())
+        return true;
+    init_icon_textures();
 
     m_background_texture.metadata.filename = m_is_dark ? "toolbar_background_dark.png" : "toolbar_background.png";
     m_background_texture.metadata.left = 16;
@@ -201,7 +211,8 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoMeshBoolean(m_parent, m_is_dark ? "toolbar_meshboolean_dark.svg" : "toolbar_meshboolean.svg", EType::MeshBoolean));
     m_gizmos.emplace_back(new GLGizmoFdmSupports(m_parent, m_is_dark ? "toolbar_support_dark.svg" : "toolbar_support.svg", EType::FdmSupports));
     m_gizmos.emplace_back(new GLGizmoSeam(m_parent, m_is_dark ? "toolbar_seam_dark.svg" : "toolbar_seam.svg", EType::Seam));
-    m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmuSegmentation));
+    m_gizmos.emplace_back(new GLGizmoFuzzySkin(m_parent, m_is_dark ? "toolbar_fuzzy_skin_paint_dark.svg" : "toolbar_fuzzy_skin_paint.svg", EType::FuzzySkin));
+    m_gizmos.emplace_back(new GLGizmoMmuSegmentation(m_parent, m_is_dark ? "mmu_segmentation_dark.svg" : "mmu_segmentation.svg", EType::MmSegmentation));
     m_gizmos.emplace_back(new GLGizmoEmboss(m_parent, m_is_dark ? "toolbar_text_dark.svg" : "toolbar_text.svg", EType::Emboss));
     m_gizmos.emplace_back(new GLGizmoSVG(m_parent));
     m_gizmos.emplace_back(new GLGizmoMeasure(m_parent, m_is_dark ? "toolbar_measure_dark.svg" : "toolbar_measure.svg", EType::Measure));
@@ -231,19 +242,32 @@ bool GLGizmosManager::init()
 
     return true;
 }
-
+std::map<int, void *> GLGizmosManager::icon_list = {};
 bool GLGizmosManager::init_icon_textures()
 {
+    if (icon_list.size() > 0) {
+        return true;
+    }
     ImTextureID texture_id;
 
     icon_list.clear();
-    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/toolbar_reset.svg", 14, 14, texture_id))
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/toolbar_reset.svg", 16, 16, texture_id))
         icon_list.insert(std::make_pair((int)IC_TOOLBAR_RESET, texture_id));
     else
         return false;
 
-    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/toolbar_reset_hover.svg", 14, 14, texture_id))
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/toolbar_reset_hover.svg", 16, 16, texture_id))
         icon_list.insert(std::make_pair((int)IC_TOOLBAR_RESET_HOVER, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/toolbar_reset_zero.svg", 16, 16, texture_id))
+        icon_list.insert(std::make_pair((int) IC_TOOLBAR_RESET_ZERO, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/toolbar_reset_zero_hover.svg", 16, 16, texture_id))
+        icon_list.insert(std::make_pair((int) IC_TOOLBAR_RESET_ZERO_HOVER, texture_id));
     else
         return false;
 
@@ -257,6 +281,46 @@ bool GLGizmosManager::init_icon_textures()
     else
         return false;
 
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_menu.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_MENU, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_menu_hover.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_MENU_HOVER, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_menu_dark.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_MENU_DARK, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_menu_dark_hover.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_MENU_DARK_HOVER, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_zoom.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_ZOOM, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_zoom_hover.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_ZOOM_HOVER, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_zoom_dark.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_ZOOM_DARK, texture_id));
+    else
+        return false;
+
+    if (IMTexture::load_from_svg_file(Slic3r::resources_dir() + "/images/canvas_zoom_dark_hover.svg", 72, 72, texture_id))
+        icon_list.insert(std::make_pair((int) IC_CANVAS_ZOOM_DARK_HOVER, texture_id));
+    else
+        return false;
+    
     return true;
 }
 
@@ -371,6 +435,9 @@ void GLGizmosManager::update_assemble_view_data()
 void GLGizmosManager::update_data()
 {
     if (!m_enabled) return;
+
+    const Selection& selection = m_parent.get_selection();
+
     if (m_common_gizmos_data)
         m_common_gizmos_data->update(get_current()
                                    ? get_current()->get_requirements()
@@ -381,8 +448,10 @@ void GLGizmosManager::update_data()
     if (m_current != Flatten && !m_gizmos.empty()) m_gizmos[Flatten]->data_changed(m_serializing);
 
     //BBS: GUI refactor: add object manipulation in gizmo
-    m_object_manipulation.update_ui_from_settings();
-    m_object_manipulation.UpdateAndShow(true);
+    if (!selection.is_empty()) {
+        m_object_manipulation.update_ui_from_settings();
+        m_object_manipulation.UpdateAndShow(true);
+    }
 }
 
 bool GLGizmosManager::is_running() const
@@ -445,20 +514,39 @@ bool GLGizmosManager::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_p
         return dynamic_cast<GLGizmoFdmSupports*>(m_gizmos[FdmSupports].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == Seam)
         return dynamic_cast<GLGizmoSeam*>(m_gizmos[Seam].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
-    else if (m_current == MmuSegmentation)
-        return dynamic_cast<GLGizmoMmuSegmentation*>(m_gizmos[MmuSegmentation].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    else if (m_current == MmSegmentation)
+        return dynamic_cast<GLGizmoMmuSegmentation*>(m_gizmos[MmSegmentation].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == Measure)
         return dynamic_cast<GLGizmoMeasure *>(m_gizmos[Measure].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == Assembly)
         return dynamic_cast<GLGizmoAssembly *>(m_gizmos[Assembly].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == Cut)
         return dynamic_cast<GLGizmoCut3D*>(m_gizmos[Cut].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    else if (m_current == FuzzySkin)
+        return dynamic_cast<GLGizmoFuzzySkin*>(m_gizmos[FuzzySkin].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == MeshBoolean)
         return dynamic_cast<GLGizmoMeshBoolean*>(m_gizmos[MeshBoolean].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == BrimEars)
         return dynamic_cast<GLGizmoBrimEars*>(m_gizmos[BrimEars].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else
         return false;
+}
+
+bool GLGizmosManager::is_paint_gizmo()
+{
+    return m_current == EType::FdmSupports ||
+           m_current == EType::MmSegmentation ||
+           m_current == EType::FuzzySkin ||
+           m_current == EType::Seam;
+}
+
+bool GLGizmosManager::is_allow_select_all() {
+    if (m_current == Undefined || m_current == EType::Move||
+        m_current == EType::Rotate ||
+        m_current == EType::Scale) {
+        return true;
+    }
+    return false;
 }
 
 ClippingPlane GLGizmosManager::get_clipping_plane() const
@@ -547,7 +635,7 @@ bool GLGizmosManager::on_mouse_wheel(const wxMouseEvent &evt)
 {
     bool processed = false;
 
-    if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmuSegmentation || m_current == BrimEars) {
+    if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin || m_current == BrimEars) {
         float rot = (float)evt.GetWheelRotation() / (float)evt.GetWheelDelta();
         if (gizmo_event((rot > 0.f ? SLAGizmoEventType::MouseWheelUp : SLAGizmoEventType::MouseWheelDown), Vec2d::Zero(), evt.ShiftDown(), evt.AltDown()
             // BBS
@@ -745,7 +833,7 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
         //case 'r' :
         //case 'R' :
         //{
-            //if ((m_current == SlaSupports || m_current == Hollow || m_current == FdmSupports || m_current == Seam || m_current == MmuSegmentation) && gizmo_event(SLAGizmoEventType::ResetClippingPlane))
+            //if ((m_current == SlaSupports || m_current == Hollow || m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin) && gizmo_event(SLAGizmoEventType::ResetClippingPlane))
             //    processed = true;
 
             //break;
@@ -849,12 +937,14 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                 if (gizmo_event(SLAGizmoEventType::AltUp) || (is_editing && is_rectangle_dragging))
                     processed = true;
             }
-
-            // BBS
-            if (m_current == MmuSegmentation && keyCode > '0' && keyCode <= '9') {
-                // capture number key
-                processed = true;
+            else if (keyCode == WXK_CONTROL) {
+                gizmo_event(SLAGizmoEventType::CtrlUp);
             }
+        }
+        // BBS
+        if (m_current == MmSegmentation && keyCode > '0' && keyCode <= '9') {
+            // capture number key
+            processed = true;
         }
         if (m_current == Measure || m_current == Assembly) {
             if (keyCode == WXK_CONTROL)
@@ -901,23 +991,49 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                 processed = simplify->on_esc_key_down();
         }
         // BBS
-        else if (m_current == MmuSegmentation) {
+        else if (m_current == MmSegmentation) {
             GLGizmoMmuSegmentation* mmu_seg = dynamic_cast<GLGizmoMmuSegmentation*>(get_current());
             if (mmu_seg != nullptr) {
                 if (keyCode >= WXK_NUMPAD0 && keyCode <= WXK_NUMPAD9) {
                     keyCode = keyCode- WXK_NUMPAD0+'0';
                 }
                 if (keyCode >= '0' && keyCode <= '9') {
-                    if (keyCode == '1' && !m_timer_set_color.IsRunning()) {
-                        m_timer_set_color.StartOnce(500);
-                        processed = true;
-                    }
-                    else if (keyCode < '7' && m_timer_set_color.IsRunning()) {
-                        processed = mmu_seg->on_number_key_down(keyCode - '0'+10);
-                        m_timer_set_color.Stop();
-                    }
-                    else {
-                        processed = mmu_seg->on_number_key_down(keyCode - '0');
+                    const int digit = keyCode - '0';
+                    const int shortcut_max = int(GLGizmoMmuSegmentation::EXTRUDERS_LIMIT);
+                    auto select_shortcut = [mmu_seg](int number) {
+                        return number > 0 && mmu_seg->on_number_key_down(number);
+                    };
+
+                    if (m_timer_set_color.IsRunning() && m_pending_color_shortcut_tens > 0) {
+                        const int two_digit_shortcut = m_pending_color_shortcut_tens * 10 + digit;
+                        if (two_digit_shortcut <= shortcut_max) {
+                            processed = select_shortcut(two_digit_shortcut);
+                            m_pending_color_shortcut_tens = 0;
+                            m_timer_set_color.Stop();
+                        } else {
+                            // Fall back to the pending single-digit shortcut and then process current digit as fresh input.
+                            processed = select_shortcut(m_pending_color_shortcut_tens);
+                            m_pending_color_shortcut_tens = 0;
+                            m_timer_set_color.Stop();
+
+                            const bool can_start_two_digit = digit > 0 && digit * 10 <= shortcut_max;
+                            if (can_start_two_digit) {
+                                m_pending_color_shortcut_tens = digit;
+                                m_timer_set_color.StartOnce(500);
+                                processed = true;
+                            } else {
+                                processed = select_shortcut(digit) || processed;
+                            }
+                        }
+                    } else {
+                        const bool can_start_two_digit = digit > 0 && digit * 10 <= shortcut_max;
+                        if (can_start_two_digit) {
+                            m_pending_color_shortcut_tens = digit;
+                            m_timer_set_color.StartOnce(500);
+                            processed = true;
+                        } else {
+                            processed = select_shortcut(digit);
+                        }
                     }
                 }
                 else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G') {
@@ -964,11 +1080,14 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
 
 void GLGizmosManager::on_set_color_timer(wxTimerEvent& evt)
 {
-    if (m_current == MmuSegmentation) {
+    if (m_current == MmSegmentation && m_pending_color_shortcut_tens > 0) {
         GLGizmoMmuSegmentation* mmu_seg = dynamic_cast<GLGizmoMmuSegmentation*>(get_current());
-        mmu_seg->on_number_key_down(1);
-        m_parent.set_as_dirty();
+        if (mmu_seg != nullptr) {
+            mmu_seg->on_number_key_down(m_pending_color_shortcut_tens);
+            m_parent.set_as_dirty();
+        }
     }
+    m_pending_color_shortcut_tens = 0;
 }
 
 void GLGizmosManager::update_after_undo_redo(const UndoRedo::Snapshot& snapshot)
@@ -1296,8 +1415,13 @@ bool GLGizmosManager::activate_gizmo(EType type)
                          UndoRedo::SnapshotType::LeavingGizmoWithAction);
     }
 
-    if (type == Undefined) { 
+    if (type == Undefined) {
         // it is deactivation of gizmo
+        if (m_restore_realistic_view_after_paint && wxGetApp().app_config != nullptr) {
+            wxGetApp().app_config->set_bool(SETTING_OPENGL_REALISTIC_MODE, true);
+            wxGetApp().app_config->save();
+            m_restore_realistic_view_after_paint = false;
+        }
         m_current = Undefined;
         return true;
     }
@@ -1305,6 +1429,16 @@ bool GLGizmosManager::activate_gizmo(EType type)
     // set up new gizmo
     GLGizmoBase& new_gizmo = *m_gizmos[type];
     if (!new_gizmo.is_activable()) return false;
+
+    if (type == Seam || type == FdmSupports || type == FuzzySkin) {
+        if (wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE)) {
+            m_restore_realistic_view_after_paint = true;
+            wxGetApp().app_config->set_bool(SETTING_OPENGL_REALISTIC_MODE, false);
+            wxGetApp().app_config->save();
+        }
+    } else {
+        m_restore_realistic_view_after_paint = false;
+    }
 
     if (!m_serializing && new_gizmo.wants_enter_leave_snapshots())
         Plater::TakeSnapshot snapshot(wxGetApp().plater(),
@@ -1340,7 +1474,7 @@ bool GLGizmosManager::is_in_editing_mode(bool error_notification) const
     /*if (m_current == SlaSupports && dynamic_cast<GLGizmoSlaSupports*>(get_current())->is_in_editing_mode()) {
         return true;
     } else*/ if (m_current == BrimEars) {
-        dynamic_cast<GLGizmoBrimEars*>(get_current())->save_model();
+        dynamic_cast<GLGizmoBrimEars *>(get_current())->update_model_object();
         return false;
     } else {
         return false;
@@ -1377,8 +1511,10 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Seam";
     case GLGizmosManager::EType::Emboss:
         return "Text";
-    case GLGizmosManager::EType::MmuSegmentation:
+    case GLGizmosManager::EType::MmSegmentation:
         return "Color Painting";
+    case GLGizmosManager::EType::FuzzySkin:
+        return "Fuzzy Skin Painting";
     default:
         return "";
     }

@@ -7,6 +7,9 @@
 #include <iostream>
 #include <string>
 #include <chrono>
+
+#include "WebSocketUtils.hpp"
+
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace websocket = beast::websocket; // from <boost/beast/websocket.hpp>
@@ -46,6 +49,8 @@ public:
         if(_host.size()>0&&_host[host.size()-1] == '/'){
             _host[host.size()-1] = '\0';
         }
+
+        Slic3r::enable_websocket_permessage_deflate(ws_);
 
         // _host += ':' + std::to_string(ep.port());
         // Set a decorator to change the User-Agent of the handshake

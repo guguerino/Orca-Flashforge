@@ -1,15 +1,16 @@
 {
-    "type": "filament",
     "additional_cooling_fan_speed": [
         "60"
     ],
     "filament_settings_id": [
         "Flashforge PETG Pro"
     ],
+    "filament_vendor": [
+        "Flashforge"
+    ],
     "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
     "inherits": "Flashforge Generic PETG",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PETG Pro",
     "nozzle_temperature": [
@@ -21,11 +22,13 @@
     "overhang_fan_speed": [
         "100"
     ],
+    "setting_id": "IQfUoy7gTmVmBDL5",
     "slow_down_min_speed": [
         "20"
     ],
     "support_material_interface_fan_speed": [
         "100"
     ],
+    "type": "filament",
     "version": "2.1.1.0"
 }

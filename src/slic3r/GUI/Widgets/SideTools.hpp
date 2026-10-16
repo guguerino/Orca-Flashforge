@@ -4,9 +4,9 @@
 #include <wx/dcgraph.h>
 #include <wx/gdicmn.h>
 #include <wx/dcclient.h>
-#include <wx/hyperlink.h>
 #include "Button.hpp"
 #include "Label.hpp"
+#include "HyperLink.hpp" // ORCA
 #include "../GUI/Tabbook.hpp"
 #include "../DeviceManager.hpp"
 #include "../wxExtensions.hpp"
@@ -33,7 +33,7 @@ enum MonitorStatus {
     MONITOR_DISCONNECTED_SERVER = 1 << 4,
     MONITOR_CONNECTING          = 1 << 5,
     MONITOR_CONNECTED_FAILED    = 1 << 6,
-    MONITOR_LOGIN_OFFLINE       = 1 << 7,
+    MONITOR_ACCOUNT_RECONNECTING = 1 << 7,
 };
 
 #define SIDE_TOOL_CLICK_INTERVAL 20
@@ -120,12 +120,11 @@ private:
     Label* m_st_txt_extra_info{ nullptr };
     wxWindow* m_side_error_panel{ nullptr };
     Button* m_connection_info{ nullptr };
-    wxHyperlinkCtrl* m_hyperlink{ nullptr };
+    HyperLink* m_hyperlink{ nullptr }; // ORCA
     ScalableButton* m_more_button{ nullptr };
     ScalableBitmap      m_more_err_open;
     ScalableBitmap      m_more_err_close;
     bool                m_more_err_state{ false };
-    bool                m_account_online{true};
 
 public:
     void set_table_panel(Tabbook* tb) {m_tabpanel = tb;};
@@ -140,8 +139,6 @@ public:
     void update_connect_err_info(int code, wxString desc, wxString info);
     void show_status(int status);
     int  getConnectInfoHeight();
-    void setAccountState(bool state);
-    bool getAccountState();
 
 public:
     SideToolsPanel* get_panel() {return m_side_tools;};

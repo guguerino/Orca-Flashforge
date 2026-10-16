@@ -12,6 +12,14 @@ namespace GUI {
 
 class NotificationManager;
 
+#ifdef __linux__
+void show_linux_web_download_start(size_t id, const wxString &filename, const wxString &folder);
+void show_linux_web_download_progress(size_t id, float percentage);
+void show_linux_web_download_complete(const wxString &path);
+void show_linux_web_download_complete(size_t id, const wxString &path);
+void show_linux_web_download_error(size_t id, const wxString &message);
+#endif
+
 enum DownloadState
 {
     DownloadPending = 0,
@@ -65,7 +73,7 @@ public:
         m_dest_folder = dest_folder;
         m_initialized = true; 
     }
-    void start_download(const std::string& full_url, const std::string &fileName = "");
+    void start_download(const std::string& full_url, const std::string &fileName = "", bool need_escape = false);
     // cancel = false -> just pause
     bool user_action_callback(DownloaderUserAction action, int id);
 private:

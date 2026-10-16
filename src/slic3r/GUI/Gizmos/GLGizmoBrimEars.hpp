@@ -3,6 +3,7 @@
 
 #include "GLGizmoBase.hpp"
 #include "slic3r/GUI/GLSelectionRectangle.hpp"
+#include "slic3r/GUI/I18N.hpp"
 #include "libslic3r/BrimEarsPoint.hpp"
 #include "libslic3r/ObjectID.hpp"
 
@@ -80,14 +81,15 @@ public:
     bool on_mouse(const wxMouseEvent& mouse_event) override;
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
     void delete_selected_points();
-    void save_model();
+    bool has_selected_points() const;
+    void update_model_object();
     //ClippingPlane get_sla_clipping_plane() const;
 
     bool is_selection_rectangle_dragging() const { return m_selection_rectangle.is_dragging(); }
 
     bool wants_enter_leave_snapshots() const override { return true; }
-    std::string get_gizmo_entering_text() const override { return "Entering Brim Ears"; }
-    std::string get_gizmo_leaving_text() const override { return "Leaving Brim Ears"; }
+    std::string get_gizmo_entering_text() const override { return _u8L("Entering Brim Ears"); }
+    std::string get_gizmo_leaving_text() const override { return _u8L("Leaving Brim Ears"); }
 
 private:
     bool on_init() override;
@@ -108,7 +110,7 @@ private:
     const Vec3d m_world_normal = {0, 0, 1};
     std::map<GLVolume*, std::shared_ptr<PickRaycaster>>   m_mesh_raycaster_map;
     GLVolume* m_last_hit_volume;
-    CacheEntry* render_hover_point = nullptr;
+    std::optional<CacheEntry> render_hover_point;
 
     bool m_link_text_hover = false;
     
@@ -117,6 +119,9 @@ private:
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
     std::map<std::string, wxString> m_desc;
+    // Contains all shortcuts in the format of {shortcut, description}, e.g. {alt + _L("Left mouse button"), _L("Part_selection")}
+    std::vector<std::pair<wxString, wxString>> m_shortcuts;
+
 
     GLSelectionRectangle m_selection_rectangle;
 
@@ -144,6 +149,10 @@ private:
     void get_detection_radius_max();
     void update_raycasters();
 
+    void begin_radius_change(float initial_value);
+    void update_cache_radius();
+    void apply_radius_change();
+
 protected:
     void on_set_state() override;
     void on_set_hover_id() override
@@ -155,7 +164,6 @@ protected:
     void on_start_dragging() override;
     void on_stop_dragging() override;
     void on_render_input_window(float x, float y, float bottom_limit) override;
-    void show_tooltip_information(float x, float y);
 
     std::string on_get_name() const override;
     bool on_is_activable() const override;
@@ -173,6 +181,8 @@ protected:
     ExPolygon make_polygon(BrimPoint point, const Geometry::Transformation &trsf);
     void find_single();
 };
+
+wxDECLARE_EVENT(wxEVT_THREAD_DONE, wxCommandEvent);
 
 } // namespace GUI
 } // namespace Slic3r

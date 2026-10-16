@@ -1,5 +1,6 @@
 #include "FFButton.hpp"
 #include <wx/dcgraph.h>
+#include <wx/dcbuffer.h>
 #include "slic3r/GUI/wxExtensions.hpp"
 
 
@@ -12,6 +13,7 @@ FFButton::FFButton(wxWindow* parent, wxWindowID id/*= wxID_ANY*/, const wxString
     , m_enable(true)
 	, m_borderRadius(borderRadius)
 	, m_borderWidth(2)
+    , m_iconSpacing(8)
 	, m_fontColor("#333333")
 	, m_fontHoverColor("#65A79E")
 	, m_fontPressColor("#419488")
@@ -28,6 +30,7 @@ FFButton::FFButton(wxWindow* parent, wxWindowID id/*= wxID_ANY*/, const wxString
 	if (parent) {
 		SetBackgroundColour(parent->GetBackgroundColour());	
 	}
+	SetBackgroundStyle(wxBG_STYLE_PAINT);
 	SetLabel(label);
 	Bind(wxEVT_ENTER_WINDOW, [this](wxMouseEvent& e) { m_hoverFlag = true; Refresh(); e.Skip(); });
 	Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& e) { m_hoverFlag = false; m_pressFlag = false; Refresh(); e.Skip(); });
@@ -36,9 +39,6 @@ FFButton::FFButton(wxWindow* parent, wxWindowID id/*= wxID_ANY*/, const wxString
 	Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent &e) { Refresh(); e.Skip(); });
 	Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent &e) { Refresh(); e.Skip(); });
 	Bind(wxEVT_PAINT, &FFButton::OnPaint, this);
-	Bind(wxEVT_ERASE_BACKGROUND, [=](auto& e) {
-		e.Skip();
-	});
 	Layout();
 	Fit();
 }
@@ -129,6 +129,24 @@ void FFButton::SetFontUniformColor(const wxColour& color)
 	Refresh();
 }
 
+void FFButton::SetUniformColors(const wxColour& fontColor, const wxColour& borderColor, const wxColour& bgColor)
+{
+	const bool unchanged =
+		m_fontColor == fontColor && m_fontHoverColor == fontColor &&
+		m_fontPressColor == fontColor && m_fontDisableColor == fontColor &&
+		m_borderColor == borderColor && m_borderHoverColor == borderColor &&
+		m_borderPressColor == borderColor && m_borderDisableColor == borderColor &&
+		m_bgColor == bgColor && m_bgHoverColor == bgColor &&
+		m_bgPressColor == bgColor && m_bgDisableColor == bgColor;
+	if (unchanged)
+		return;
+
+	m_fontColor = m_fontHoverColor = m_fontPressColor = m_fontDisableColor = fontColor;
+	m_borderColor = m_borderHoverColor = m_borderPressColor = m_borderDisableColor = borderColor;
+	m_bgColor = m_bgHoverColor = m_bgPressColor = m_bgDisableColor = bgColor;
+	Refresh(false);
+}
+
 void FFButton::SetBorderColor(const wxColour& color)
 {
 	m_borderColor = color;
@@ -201,37 +219,60 @@ void FFButton::SetBGUniformColor(const wxColour& color)
 	Refresh();
 }
 
-void FFButton::OnPaint(wxPaintEvent& event)
+void FFButton::SetIcon(const ScalableBitmap& bmp)
 {
-	wxPaintDC dc(this);
-    render(dc);
-	wxString text = GetLabel();
-	if (!text.IsEmpty()) {
-        if (!IsEnabled() || !m_enable) {
-			dc.SetTextForeground(m_fontDisableColor);
-		} else if (m_pressFlag) {
-			dc.SetTextForeground(m_fontPressColor);
-		} else if (m_hoverFlag) {
-			dc.SetTextForeground(m_fontHoverColor);
-		} else {
-			dc.SetTextForeground(m_fontColor);
-		}
-		// For Text: Just align-center
-		dc.SetFont(GetFont());
-		wxSize size = GetSize();
-		wxSize textSize = dc.GetMultiLineTextExtent(text);
-		wxPoint pt = wxPoint((size.x - textSize.x) / 2, (size.y - textSize.y) / 2);
-		dc.DrawText(text, pt);
-	}
-	event.Skip();
+    m_bitmap = bmp;
+    Refresh();
 }
 
-void FFButton::render(wxPaintDC &dc)
+void FFButton::SetHoverIcon(const ScalableBitmap& bmp)
 {
-    std::unique_ptr<wxGraphicsContext> gc(wxGraphicsContext::Create(dc));
+    m_hoverBitmap = bmp;
+    Refresh();
+}
+
+void FFButton::SetPressIcon(const ScalableBitmap& bmp)
+{
+    m_pressBitmap = bmp;
+    Refresh();
+}
+
+void FFButton::SetDisableIcon(const ScalableBitmap& bmp)
+{
+    m_disableBitmap = bmp;
+    Refresh();
+}
+
+void FFButton::SetUniformIcon(const ScalableBitmap& bmp)
+{
+    m_bitmap        = bmp;
+    m_hoverBitmap   = bmp;
+    m_pressBitmap   = bmp;
+    m_disableBitmap = bmp;
+    Refresh();
+}
+
+void FFButton::SetIconSpacing(int spacing) 
+{ 
+	m_iconSpacing = spacing;
+    Refresh();
+}
+
+void FFButton::OnPaint(wxPaintEvent&)
+{
+	wxAutoBufferedPaintDC dc(this);
+	dc.SetBackground(wxBrush(GetBackgroundColour()));
+	dc.Clear();
+    render(dc);
+}
+
+void FFButton::render(wxDC &dc)
+{
+    std::unique_ptr<wxGraphicsContext> gc(wxGraphicsContext::CreateFromUnknownDC(dc));
     if (gc == nullptr) {
         return;
     }
+
 	wxPen pen;
     if (!IsEnabled() || !m_enable) {
 		pen.SetColour(m_borderDisableColor);
@@ -253,16 +294,65 @@ void FFButton::render(wxPaintDC &dc)
 		pen.SetWidth(m_borderWidth);
 		gc->SetPen(pen);
 	}
+
 	double bordeWidth = m_borderFlag ? m_borderWidth : 0;
-    double x = bordeWidth * 0.5;
-    double y = bordeWidth * 0.5;
-    double width = size.x - bordeWidth;
-    double height = size.y - bordeWidth;
+    double x          = bordeWidth * 0.5;
+    double y          = bordeWidth * 0.5;
+    double width      = size.x - bordeWidth;
+    double height     = size.y - bordeWidth;
     if (m_borderRadius == 0) {
         gc->DrawRectangle(x, y, width, height);
     } else {
         gc->DrawRoundedRectangle(x, y, width, height, m_borderRadius);
     }
+
+	wxString       text = GetLabel();
+    ScalableBitmap bmp;
+    if (!text.IsEmpty()) {
+        if (!IsEnabled() || !m_enable) {
+            dc.SetTextForeground(m_fontDisableColor);
+            bmp = m_disableBitmap;
+        } else if (m_pressFlag) {
+            dc.SetTextForeground(m_fontPressColor);
+            bmp = m_pressBitmap;
+        } else if (m_hoverFlag) {
+            dc.SetTextForeground(m_fontHoverColor);
+            bmp = m_hoverBitmap;
+        } else {
+            dc.SetTextForeground(m_fontColor);
+            bmp = m_bitmap;
+        }
+        // For Text: Just align-center
+        dc.SetFont(GetFont());
+        wxSize size         = GetSize();
+        wxSize textSize     = dc.GetMultiLineTextExtent(text);
+        int    contentWidth = textSize.x;
+
+        if (bmp.bmp().IsOk()) {
+            contentWidth += bmp.GetBmpWidth() + FromDIP(m_iconSpacing);
+        }
+
+        int pt = (size.x - contentWidth) / 2;
+        if (bmp.bmp().IsOk()) {
+            gc->DrawBitmap(bmp.bmp(), pt, (size.y - bmp.GetBmpHeight()) / 2, bmp.GetBmpWidth(), bmp.GetBmpHeight());
+            pt += bmp.GetBmpWidth() + FromDIP(m_iconSpacing);
+        }
+        dc.DrawText(text, pt, (size.y - textSize.y) / 2);
+    } else {
+        if (!IsEnabled() || !m_enable) {
+            bmp = m_disableBitmap;
+        } else if (m_pressFlag) {
+            bmp = m_pressBitmap;
+        } else if (m_hoverFlag) {
+            bmp = m_hoverBitmap;
+        } else {
+            bmp = m_bitmap;
+        }
+        if (bmp.bmp().IsOk()) {
+            gc->DrawBitmap(bmp.bmp(), (size.x - bmp.GetBmpWidth()) / 2, (size.y - bmp.GetBmpHeight()) / 2, bmp.GetBmpWidth(),
+                           bmp.GetBmpHeight());
+        }
+	}
 }
 
 void FFButton::updateState()
@@ -295,15 +385,16 @@ FFPushButton::FFPushButton(wxWindow *parent,
 							const wxString &pressIcon,
 							const wxString &disableIcon,
 							const int iconSize)
-    : wxButton(parent, id, wxEmptyString, wxPoint(10, 10), wxDefaultSize, wxNO_BORDER)
+    : wxWindow(parent, id, wxDefaultPosition, wxDefaultSize, wxNO_BORDER)
     , m_normalIcon(normalIcon)
     , m_hoverIcon(hoverIcon)
     , m_pressIcon(pressIcon)
     , m_disableIcon(disableIcon)
 {
     //SetBitmap(wxBitmap(normalIcon));
-    SetMinSize(wxSize(FromDIP(21), FromDIP(21)));
-    SetMaxSize(wxSize(FromDIP(21), FromDIP(21)));
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    SetMinSize(wxSize(FromDIP(iconSize), FromDIP(iconSize)));
+    SetMaxSize(wxSize(FromDIP(iconSize), FromDIP(iconSize)));
     m_normalBitmap  = create_scaled_bitmap(normalIcon.ToStdString(), this, iconSize);
     m_hoverBitmap   = create_scaled_bitmap(hoverIcon.ToStdString(), this, iconSize);
     m_pressBitmap   = create_scaled_bitmap(pressIcon.ToStdString(), this, iconSize);
@@ -320,6 +411,8 @@ FFPushButton::FFPushButton(wxWindow *parent,
 void FFPushButton::OnPaint(wxPaintEvent &event) 
 {
     wxPaintDC dc(this);
+    dc.SetBackground(wxBrush(GetBackgroundColour()));
+    dc.Clear();
     if (IsEnabled()) {
         if (m_isPressed) {
             dc.DrawBitmap(m_pressBitmap, 0, 0, true);

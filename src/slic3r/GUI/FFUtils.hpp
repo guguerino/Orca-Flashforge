@@ -17,7 +17,8 @@ enum FFPrinterPid {
 	GUIDER_4          = 0x0025,
 	AD5X              = 0x0026,
 	GUIDER_4_PRO      = 0x0027,
-	U1                = 0x0028,
+    C5                = 0x0028,
+    C5P               = 0x0029,
 	ADVENTURER_A5     = 0x00BB,
 	GUIDER_3_ULTRA    = 0x001F,
 	OTHER             = 0xFFFF
@@ -31,6 +32,14 @@ struct FFPrinterPreset
     FFPrinterPreset() {};
     FFPrinterPreset(std::string bmp_file_name, std::string name, std::string model_id)
 		: bmp_file_name(bmp_file_name), name(name), model_id(model_id) {}
+};
+
+struct FFPrinterSimpleData
+{
+    wxString name;
+    int         comId;
+    int         pid;
+    bool        wan;
 };
 
 class FFUtils
@@ -84,6 +93,14 @@ public:
 		const std::string &userAgent, std::map<std::string, std::string> &headerMap, int msTimeout);
 
 	static wxWebView *CreateWebView(wxWindow *parent);
+
+	static std::unordered_map<std::string, FFPrinterSimpleData> getDevListForModelId(std::string modelId, bool include_printing = false);
+
+    static std::unordered_map<std::string, FFPrinterSimpleData> getSelectPresetDevList(bool include_printing = false);
+
+    static bool                                                 isLikeFilament(const wxString& str);
+
+    static bool                                                 matchMaterialName(const wxString& str, const wxString& originStr);
 };
 
 }

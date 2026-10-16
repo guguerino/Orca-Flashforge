@@ -1,4 +1,7 @@
 {
+    "compatible_printers": [
+        "Flashforge AD5X 0.8 nozzle"
+    ],
     "cool_plate_temp": [
         "45"
     ],
@@ -14,12 +17,10 @@
     "filament_start_gcode": [
         "; filament start gcode\n;right_extruder_material:PLA-CF\n"
     ],
-    "from": "system",
-    "setting_id": "GFSA04",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge AD5X 0.8 nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "hot_plate_temp": [
         "60"
     ],
@@ -27,6 +28,7 @@
         "60"
     ],
     "inherits": "Flashforge Generic PLA-CF10",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge PLA-CF @FF AD5X 0.8 nozzle",
     "nozzle_temperature": [
@@ -35,6 +37,7 @@
     "nozzle_temperature_initial_layer": [
         "215"
     ],
+    "setting_id": "rmnF24E3SuwzRscH",
     "textured_cool_plate_temp": [
         "45"
     ],

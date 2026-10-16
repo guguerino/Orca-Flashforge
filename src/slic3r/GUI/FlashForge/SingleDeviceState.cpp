@@ -5,18 +5,144 @@
 #include "slic3r/GUI/MainFrame.hpp"
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
+#include "slic3r/GUI/FlashForge/MultiComHelper.hpp"
 #include "slic3r/GUI/FlashForge/PrintDevLocalFileDlg.hpp"
 #include "slic3r/GUI/FlashForge/PrinterErrorMsgDlg.hpp"
 #include <nlohmann/json.hpp>
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+#include <boost/uuid/uuid_io.hpp>
 #include <wx/dcgraph.h>
+#include <chrono>
+#include <functional>
+#include <sstream>
 using namespace std::literals;
 using json   = nlohmann::json;
 namespace pt = boost::property_tree;
 
+// 临时诊断日志：与 [FFRTMP] 一起输出到 VS 调试窗口，定位“设备断线”根因，定位后可撤�?
+// [CAMDBG] 调试日志总开关：�?false 关闭全部 [CAMDBG] 输出（需要排查时改回 true）�?
+static const bool g_camdbg_log_enabled = false;
+
+static void camdbg_log(const std::string &msg)
+{
+    if (!g_camdbg_log_enabled) return;
+    BOOST_LOG_TRIVIAL(info) << "[CAMDBG] " << msg;
+#ifdef _WIN32
+    OutputDebugStringA(("[CAMDBG] " + msg + "\n").c_str());
+#endif
+}
+
+// [UNBIND] 解绑耗时诊断：每条日志带 steady_clock 毫秒时间戳，用于定位设备解绑
+// 卡在哪一段（相邻两条日志的时间戳差即该段耗时）。定位后把开关置 false 即可关闭�?
+// Temporary diagnostic for printers whose camera is installed after the
+// printer was manufactured. This is independent from the verbose UI log.
+static const bool g_camera_capability_log_enabled = false;
+
+static void camera_capability_log(const std::string &msg)
+{
+    if (!g_camera_capability_log_enabled) return;
+    BOOST_LOG_TRIVIAL(info) << "[CAMERA_CAPABILITY] " << msg;
+#ifdef _WIN32
+    OutputDebugStringA(("[CAMERA_CAPABILITY] " + msg + "\n").c_str());
+#endif
+}
+
+static const bool g_unbind_timing_enabled = false;
+static void unbind_ts(const std::string &tag)
+{
+    if (!g_unbind_timing_enabled) return;
+    int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::string line = "[UNBIND] t=" + std::to_string(ms) + "ms | " + tag;
+    BOOST_LOG_TRIVIAL(info) << line;
+#ifdef _WIN32
+    OutputDebugStringA((line + "\n").c_str());
+#endif
+}
+
 namespace Slic3r {
 namespace GUI {
+
+namespace {
+
+constexpr auto FF_DEVICE_PAGE_PRIMARY_TEXT = "#333333";
+
+enum class CameraStreamProtocol { Source, Rtmp };
+
+// Change this single value to compare the device's fixed HLS and RTMP URLs.
+static constexpr CameraStreamProtocol g_camera_stream_protocol = CameraStreamProtocol::Rtmp;
+
+std::string switch_camera_stream_url(const std::string& source, CameraStreamProtocol protocol)
+{
+    if (source.empty()) return source;
+
+    std::string result = source;
+    if (protocol == CameraStreamProtocol::Rtmp) {
+        if (result.rfind("https://", 0) == 0)
+            result.replace(0, 8, "rtmp://");
+        else if (result.rfind("http://", 0) == 0)
+            result.replace(0, 7, "rtmp://");
+
+        const size_t suffix = result.find(".m3u8");
+        if (suffix != std::string::npos) result.erase(suffix, 5);
+        const size_t suffix2 = result.find(".flv");
+        if (suffix2 != std::string::npos) result.erase(suffix2, 4);
+    } else if (protocol == CameraStreamProtocol::Source) {
+    }
+    return result;
+}
+
+void apply_device_page_light_text(wxWindow* window, const wxColour& color)
+{
+#ifdef __APPLE__
+    if (window) {
+        window->SetForegroundColour(color);
+    }
+#else
+    (void) window;
+    (void) color;
+#endif
+}
+
+static const bool g_device_detail_layout_log_enabled = false;
+
+void log_device_detail_layout(const std::string& message)
+{
+    if (!g_device_detail_layout_log_enabled) return;
+    BOOST_LOG_TRIVIAL(info) << "[DeviceDetailLayout] " << message;
+#ifdef _WIN32
+    OutputDebugStringA(("[DeviceDetailLayout] " + message + "\n").c_str());
+#endif
+}
+
+wxString format_cumulative_filament(double cumulative_filament, ComConnectMode connect_mode)
+{
+    const double filament_cm = connect_mode == COM_CONNECT_WAN ? cumulative_filament * 100.0 : cumulative_filament / 10.0;
+    return wxString::Format("%.0fcm", filament_cm);
+}
+
+wxString format_cumulative_print_time(const fnet_dev_detail_t &detail, ComConnectMode connect_mode)
+{
+    if (detail.hasCumulativePrintTimeSecond != 0) {
+        const double cumulative_seconds = detail.cumulativePrintTimeSecond > 0.0 ? detail.cumulativePrintTimeSecond : 0.0;
+        const long long total_minutes   = static_cast<long long>(cumulative_seconds / 60.0);
+        if (total_minutes < 60) {
+            return wxString::Format(_L("%lld minutes"), total_minutes);
+        }
+
+        const long long hours   = total_minutes / 60;
+        const long long minutes = total_minutes % 60;
+        return wxString::Format(_L("%lld hours %lld minutes"), hours, minutes);
+    }
+
+    const double old_hours = connect_mode == COM_CONNECT_LAN ? detail.cumulativePrintTime / 60.0 : detail.cumulativePrintTime;
+    return wxString::Format("%.2f hours", old_hours);
+}
+
+} // namespace
 
 wxDEFINE_EVENT(EVT_SWITCH_TO_FILETER, wxCommandEvent);
 
@@ -35,7 +161,12 @@ const std::string P_ERROR     = "error";
 const std::string P_PAUSING  = "pausing";
 const std::string P_BUSY      = "busy";
 const std::string P_HEATING   = "heating";
-const std::string P_CALIBRATE  = "calibrate_doing";
+const std::string P_CALIBRATE = "calibrate_doing";
+const std::string P_LOADING = "loading";
+const std::string P_CLOUD_SLICING = "cloud_slicing";
+const std::string P_SENDING       = "sending";
+const std::string P_DOWNLOADING   = "downloading";
+const std::string P_UNZIPPING = "unzipping";
 
 const wxString    TEMPERATURE = _L("Temperature");
 const wxString    TEMP_CANCEL  = _L("cancel");
@@ -43,10 +174,14 @@ const wxString    TEMP_CONFIRM = _L("confirm");
 
 const wxString HAS_NO_PRINTING = "The current device has \nno printing projects";
 
-const int TEXT_LENGTH = 15;
+const wxString HAS_NO_PRINTING_U1 = "Full Power! Create Now!";
+
 const int MATERIAL_PIC_WIDTH  = 80;
 const int MATERIAL_PIC_HEIGHT = 80;
 const int IDLE_NAME_LENGTH    = 150;
+const int PRINT_FILE_INFO_WIDTH = 384;
+const int PRINT_FILE_NAME_WIDTH = 320;
+const int PRINT_FILE_HEAD_WIDTH_PADDING = 8;
 
 const int FILELIST_PIC_WIDTH = 41;
 const int FILELIST_PIC_HEIGHT = 45;
@@ -149,10 +284,11 @@ void StartFilter::create_panel(wxWindow* parent)
     m_panel_filtering_title->Layout();
     bSizer_filtering_title->Fit(m_panel_filtering_title);
 
-    //内循环过滤
+    //内循环过�?
     wxBoxSizer *bSizer_internal_circulate_hor = new wxBoxSizer(wxHORIZONTAL);
     wxPanel*    internal_circulate_panel      = new wxPanel(parent, wxID_ANY, wxDefaultPosition,wxDefaultSize, wxTAB_TRAVERSAL);
     auto m_staticText_internal_circulate = new wxStaticText(internal_circulate_panel, wxID_ANY, _L("Internal Circulate"), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    apply_device_page_light_text(m_staticText_internal_circulate, wxColour(FF_DEVICE_PAGE_PRIMARY_TEXT));
     //m_staticText_internal_circulate->SetFont(wxFont(wxFontInfo(16)));
     m_internal_circulate_switch = new SwitchButton(internal_circulate_panel);
     m_internal_circulate_switch->SetBackgroundColour(*wxWHITE);
@@ -167,10 +303,11 @@ void StartFilter::create_panel(wxWindow* parent)
     internal_circulate_panel->Layout();
     bSizer_internal_circulate_hor->Fit(internal_circulate_panel);
 
-    //外循环过滤
+    //外循环过�?
     wxBoxSizer *bSizer_external_circulate_hor = new wxBoxSizer(wxHORIZONTAL);
     wxPanel*    external_circulate_panel      = new wxPanel(parent, wxID_ANY, wxDefaultPosition,wxDefaultSize, wxTAB_TRAVERSAL);
     auto m_staticText_external_circulate = new wxStaticText(external_circulate_panel, wxID_ANY, _L("External Circulate"), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    apply_device_page_light_text(m_staticText_external_circulate, wxColour(FF_DEVICE_PAGE_PRIMARY_TEXT));
     //m_staticText_external_circulate->SetFont(wxFont(wxFontInfo(16)));
     m_external_circulate_switch = new SwitchButton(external_circulate_panel);
     m_external_circulate_switch->SetBackgroundColour(*wxWHITE);
@@ -267,7 +404,7 @@ void ModifyTemp::create_panel(wxWindow *parent)
     m_panel_temp_title->Layout();
     bSizer_temp_title->Fit(m_panel_temp_title);
 
-    // 确认、取消按钮
+    // 确认、取消按�?
     //垂直布局、水平布局
     wxBoxSizer *bSizer_operate_hor = new wxBoxSizer(wxHORIZONTAL);
     wxPanel *operate_panel = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(109)), wxTAB_TRAVERSAL);
@@ -342,6 +479,14 @@ DeviceDetail::DeviceDetail(wxWindow* parent)
 {
     SetBackgroundColour(*wxWHITE);
     create_panel(this);
+    Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+        event.Skip();
+        const wxSize size = event.GetSize();
+        if (size != m_last_logged_size) {
+            m_last_logged_size = size;
+            CallAfter([this] { logLayoutState("size"); });
+        }
+    });
 }
 
 void DeviceDetail::setCurId(int curId) 
@@ -355,7 +500,6 @@ void DeviceDetail::setCurId(int curId)
 void DeviceDetail::create_panel(wxWindow* parent)
 {
     wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-    sizer->SetMinSize(FromDIP(491), -1);
     wxBoxSizer *bSizer_confirm_row = new wxBoxSizer(wxHORIZONTAL);
     auto confirm_push_btn = new FFPushButton(this, wxID_ANY, "push_button_confirm_normal", 
         "push_button_confirm_hover", "push_button_confirm_press", "push_button_confirm_normal");
@@ -367,10 +511,16 @@ void DeviceDetail::create_panel(wxWindow* parent)
         double nozzle_fan;
         double cooling_fan;
         switchPage();
-        if (m_device_speed) {
-            wxString str_speed = m_device_speed->getTextValue();
-            str_speed.ToDouble(&speed);
-            double ss = speed;
+        if (!FFUtils::isNozzlesPrinter(FFUtils::getPid(m_cur_id))) {
+            if (m_device_speed) {
+                wxString str_speed = m_device_speed->getTextValue();
+                str_speed.ToDouble(&speed);
+            }
+        } else {
+            if (m_device_speed_u1) {
+                auto s = static_cast<int>((uintptr_t)m_device_speed_u1->combobox()->GetClientData(m_device_speed_u1->combobox()->GetSelection()));
+                speed = s;
+            }
         }
         if (m_device_z_axis) {
             m_device_z_axis->getTextValue().ToDouble(&z_axis);
@@ -389,6 +539,7 @@ void DeviceDetail::create_panel(wxWindow* parent)
     sizer->AddSpacer(FromDIP(15));
     bSizer_confirm_row->AddStretchSpacer();
     bSizer_confirm_row->Add(confirm_push_btn, 0, wxRIGHT, FromDIP(20));
+    confirm_push_btn->Hide();
     sizer->Add(bSizer_confirm_row, 0, wxEXPAND, 0);
 //
     auto m_panel_separotor10 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
@@ -397,97 +548,57 @@ void DeviceDetail::create_panel(wxWindow* parent)
 
     sizer->Add(m_panel_separotor10);
 //
-    wxBoxSizer *bSizer_h = new wxBoxSizer(wxHORIZONTAL);
-    auto m_panel_separotor0 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-    m_panel_separotor0->SetBackgroundColour(wxColour(255, 255, 255));
-    m_panel_separotor0->SetMinSize(wxSize(FromDIP(18), -1));
+    m_grid_sizer = new wxFlexGridSizer(2, FromDIP(35), 0);
+    m_panel_rows = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, -1), wxTAB_TRAVERSAL);
 
-    bSizer_h->Add(m_panel_separotor0);
-
-    wxBoxSizer *bSizer_first_row = new wxBoxSizer(wxVERTICAL);
-    auto m_panel_first_row = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, -1), wxTAB_TRAVERSAL);
-    m_device_material = new IconText(m_panel_first_row, wxString("device_material"), 16, wxString("PLA-12345678901234567890"), 12);
-    bSizer_first_row->Add(m_device_material, 0, wxALL, 0);
-    bSizer_first_row->AddSpacer(FromDIP(35));
-
-    m_device_initial_speed = new IconText(m_panel_first_row, wxString("device_initial_speed"), 16, wxString("1000000mm/s"), 12);
-    bSizer_first_row->Add(m_device_initial_speed, 0,wxALL, 0);
-    bSizer_first_row->AddSpacer(FromDIP(35));
-
-    m_device_speed = new IconBottonText(m_panel_first_row, wxString("device_speed"), 16, wxString("90"), 12);
+    m_device_material            = new IconText(m_panel_rows, wxString("device_material"), 16, wxString("PLA-12345678901234567890"), 12);
+    m_device_layer = new IconText(m_panel_rows, wxString("device_layer"), 16, wxString("1000000/15000000"), 12);
+    m_device_initial_speed = new IconText(m_panel_rows, wxString("device_initial_speed"), 16, wxString("1000000mm/s"), 12);
+    m_device_fill_rate = new IconText(m_panel_rows, wxString("device_fill_rate"), 16, wxString("200%"), 12);
+    m_device_speed = new IconBottonText(m_panel_rows, wxString("device_speed"), 16, wxString("90"), 12);
     m_device_speed->setLimit(50, 150);
     m_device_speed->setAdjustValue(10);
-    bSizer_first_row->Add(m_device_speed, 0,wxALL, 0);
-    bSizer_first_row->AddSpacer(FromDIP(35));
-
-    m_device_z_axis = new IconBottonText(m_panel_first_row, wxString("device_z_axis"), 16, wxString("0.002"), 12,
-                                            wxString("device_z_dec"), wxString("push_button_arrow_dec_normal"));
+    m_device_speed_u1 = new MachineIconCombo(m_panel_rows, wxID_ANY, "device_speed", 16, wxDefaultPosition, wxDefaultSize);
+    m_device_speed_u1->combobox()->Append(_L("Silent Mode (50%)")   , (void*) 50);
+    m_device_speed_u1->combobox()->Append(_L("Standard Mode (100%)"), (void*) 100);
+    m_device_speed_u1->combobox()->Append(_L("Motion Mode (140%)")  , (void*) 140);
+    m_device_speed_u1->combobox()->SetSelection(0);
+    m_device_speed_u1->Hide();
+    m_device_nozzle_fan = new IconBottonText(m_panel_rows, wxString("device_nozzle_fan"), 16, wxString("50"), 12);
+    m_device_nozzle_fan->setLimit(0, 100);
+    m_device_nozzle_fan->setAdjustValue(10);
+    m_device_z_axis = new IconBottonText(m_panel_rows, wxString("device_z_axis"), 16, wxString("0.002"), 12,
+                                         wxString("device_z_dec"), wxString("push_button_arrow_dec_normal"));
     m_device_z_axis->setLimit(-5, 5);
     m_device_z_axis->setAdjustValue(0.025);
     m_device_z_axis->setPoint(3);
-    bSizer_first_row->Add(m_device_z_axis, 0, wxALL, 0);
-    bSizer_first_row->AddStretchSpacer();
-
-    m_panel_first_row->SetSizer(bSizer_first_row);
-    m_panel_first_row->Layout();
-    bSizer_first_row->Fit(m_panel_first_row);
-
-    bSizer_h->AddSpacer(FromDIP(36));
-    bSizer_h->Add(m_panel_first_row, 0, wxALL, 0);
-    //bSizer_h->AddStretchSpacer();
-    //bSizer_h->AddSpacer(FromDIP(20));
-
-//
-    wxBoxSizer *bSizer_second_row  = new wxBoxSizer(wxVERTICAL);
-    auto m_panel_second_row = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, -1), wxTAB_TRAVERSAL);
-
-    m_device_layer = new IconText(m_panel_second_row, wxString("device_layer"), 16, wxString("1000000/15000000"), 12);
-    bSizer_second_row->Add(m_device_layer, 0, wxALL, 0);
-    bSizer_second_row->AddSpacer(FromDIP(35));
-
-    m_device_fill_rate = new IconText(m_panel_second_row, wxString("device_fill_rate"), 16, wxString("200%"), 12);
-    bSizer_second_row->Add(m_device_fill_rate, 0, wxALL, 0);
-    bSizer_second_row->AddSpacer(FromDIP(35));
-
-    m_device_nozzle_fan = new IconBottonText(m_panel_second_row, wxString("device_nozzle_fan"), 16, wxString("50"), 12);
-    m_device_nozzle_fan->setLimit(0, 100);
-    m_device_nozzle_fan->setAdjustValue(10);
-    bSizer_second_row->Add(m_device_nozzle_fan, 0, wxALL, 0);
-    bSizer_second_row->AddSpacer(FromDIP(35));
-
-    m_device_cooling_fan = new IconBottonText(m_panel_second_row, wxString("device_cooling_fan"), 16, wxString("100"), 12);
+    m_device_cooling_fan = new IconBottonText(m_panel_rows, wxString("device_cooling_fan"), 16, wxString("100"), 12);
     m_device_cooling_fan->setLimit(0, 100);
     m_device_cooling_fan->setAdjustValue(10);
-    bSizer_second_row->Add(m_device_cooling_fan, 0, wxALL, 0);
-    bSizer_second_row->AddStretchSpacer();
 
-    m_panel_second_row->SetSizer(bSizer_second_row);
-    m_panel_second_row->Layout();
-    bSizer_second_row->Fit(m_panel_second_row);
+    auto rows_sizer = new wxBoxSizer(wxHORIZONTAL);
+    rows_sizer->AddStretchSpacer();
+    rows_sizer->Add(m_grid_sizer, 0, wxALIGN_CENTER_VERTICAL);
+    rows_sizer->AddStretchSpacer();
+    m_panel_rows->SetSizer(rows_sizer);
+    updateGridSizer(AD5X);
 
-    bSizer_h->Add(m_panel_second_row, 0, wxALL, 0);
-
-    //auto m_panel_separotor1 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-    //m_panel_separotor1->SetBackgroundColour(wxColour(255, 255, 255));
-    //m_panel_separotor1->SetMinSize(wxSize(FromDIP(25), -1));
-
-    //bSizer_h->Add(m_panel_separotor1);
-
-    sizer->Add(bSizer_h, 0, wxALL, 0);
+    sizer->Add(m_panel_rows, 0, wxLEFT | wxRIGHT | wxALIGN_CENTER | wxEXPAND, FromDIP(36));
 #ifdef __WIN32__
     sizer->AddSpacer(FromDIP(34));
-#else if __APPLE__
+#elif defined(__APPLE__)
     sizer->AddSpacer(FromDIP(36));
 #endif
     parent->SetSizer(sizer);
     parent->Layout();
-    parent->Fit(); 
 }
 
 void DeviceDetail::switchPage() 
 {
-    if (m_device_speed) {
-        m_device_speed->checkValue();
+    if (!FFUtils::isNozzlesPrinter(FFUtils::getPid(m_cur_id))) {
+        if (m_device_speed) {
+            m_device_speed->checkValue();
+        }
     }
     if (m_device_z_axis) {
         m_device_z_axis->checkValue();
@@ -500,7 +611,7 @@ void DeviceDetail::switchPage()
     }
 }
 
-void DeviceDetail::setMaterialName(wxString materialName) 
+void DeviceDetail::setMaterialName(wxString materialName)
 {
     m_device_material->setText(materialName);
 }
@@ -514,8 +625,23 @@ void DeviceDetail::setInitialSpeed(double initialSpeed)
 void DeviceDetail::setSpeed(double speed) 
 { 
     auto aspeed = static_cast<int>(speed);
-    m_device_speed->setText(wxString::Format("%d", aspeed));
-    m_device_speed->setCurValue(aspeed);
+    if (!FFUtils::isNozzlesPrinter(FFUtils::getPid(m_cur_id))) {
+        m_device_speed->setText(wxString::Format("%d", aspeed));
+        m_device_speed->setCurValue(aspeed);
+    } else {
+        bool isFound = 0;
+        for (int i = 0; i < m_device_speed_u1->combobox()->GetCount(); i++) {
+            int data = static_cast<int>((uintptr_t)m_device_speed_u1->combobox()->GetClientData(i));
+            if (aspeed == data) { // 对比结构体（依赖重载�?=�?
+                m_device_speed_u1->combobox()->SetSelection(i);
+                isFound = true;
+                break;
+            }
+        }
+        if (!isFound) {
+            m_device_speed_u1->combobox()->ChangeValue(wxString::Format("%d%%", aspeed));
+        }
+    }
 }
 
 void DeviceDetail::setZAxis(double value) 
@@ -554,6 +680,115 @@ void DeviceDetail::setChamberFanSpeed(double fanSpeed)
     auto aFanSpeed = static_cast<int>(fanSpeed);
     m_device_cooling_fan->setText(wxString::Format("%d", aFanSpeed));
     m_device_cooling_fan->setCurValue(aFanSpeed);
+}
+
+void DeviceDetail::updateGridSizer(int pid) 
+{
+    if (pid == OTHER) {
+        return;
+    }
+
+    m_layout_pid = pid;
+    m_grid_sizer->Clear();
+    auto addGrid = [=](wxWindow* window, bool show = true) { 
+        if (show) {
+            window->Show();
+            m_grid_sizer->Add(window, 0, wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL, 0);
+        } else {
+            window->Hide();
+        }
+    };
+    addGrid(m_device_material);
+    addGrid(m_device_layer);
+    addGrid(m_device_initial_speed);
+    addGrid(m_device_fill_rate);
+    addGrid(m_device_speed, !FFUtils::isNozzlesPrinter(pid));
+    addGrid(m_device_speed_u1, FFUtils::isNozzlesPrinter(pid));
+    addGrid(m_device_nozzle_fan);
+    addGrid(m_device_z_axis, !FFUtils::isNozzlesPrinter(pid));
+    addGrid(m_device_cooling_fan, FFUtils::isPrinterSupportCoolingFan(pid));
+    m_grid_sizer->Layout();
+    m_panel_rows->Layout();
+    Layout();
+    SetMinSize(wxSize(-1, -1));
+    InvalidateBestSize();
+    SetMinSize(wxSize(-1, std::max(FromDIP(277), GetBestSize().GetHeight())));
+    logLayoutState("grid-updated");
+    CallAfter([this] { logLayoutState("grid-settled"); });
+}
+
+void DeviceDetail::logLayoutState(const char* reason) const
+{
+    if (!m_grid_sizer || !m_panel_rows) {
+        return;
+    }
+
+    const auto log_size = [](const wxSize& size) {
+        return std::to_string(size.GetWidth()) + "x" + std::to_string(size.GetHeight());
+    };
+    const auto log_point = [](const wxPoint& point) {
+        return std::to_string(point.x) + "," + std::to_string(point.y);
+    };
+    auto* mutable_this = const_cast<DeviceDetail*>(this);
+    const wxSize panel_size = GetClientSize();
+    const wxSize rows_size  = m_panel_rows->GetClientSize();
+    const wxSize grid_min   = m_grid_sizer->GetMinSize();
+    std::ostringstream summary;
+    summary << "reason=" << reason << " pid=0x" << std::hex << m_layout_pid << std::dec << " panel=" << log_size(panel_size)
+            << " panel_best=" << log_size(GetBestSize()) << " panel_min=" << log_size(GetMinSize()) << " rows=" << log_size(rows_size)
+            << " grid_min=" << log_size(grid_min) << " cols=" << m_grid_sizer->GetCols() << " items=" << m_grid_sizer->GetItemCount();
+    log_device_detail_layout(summary.str());
+
+    const auto log_window = [&](const char* name, const wxWindow* window) {
+        if (!window) {
+            return;
+        }
+        const wxPoint screen_pos = window->ClientToScreen(wxPoint(0, 0));
+        const wxPoint detail_pos = mutable_this->ScreenToClient(screen_pos);
+        std::ostringstream child;
+        child << "child=" << name << " shown=" << window->IsShown() << " size=" << log_size(window->GetSize())
+              << " best=" << log_size(window->GetBestSize()) << " min=" << log_size(window->GetMinSize())
+              << " parent_pos=" << log_point(window->GetPosition()) << " detail_pos=" << log_point(detail_pos)
+              << " screen_pos=" << log_point(screen_pos);
+        log_device_detail_layout(child.str());
+    };
+    log_window("material", m_device_material);
+    log_window("layer", m_device_layer);
+    log_window("initial_speed", m_device_initial_speed);
+    log_window("fill_rate", m_device_fill_rate);
+    log_window("speed", m_device_speed);
+    log_window("speed_mode", m_device_speed_u1);
+    log_window("nozzle_fan", m_device_nozzle_fan);
+    log_window("z_axis", m_device_z_axis);
+    log_window("cooling_fan", m_device_cooling_fan);
+
+    // Log every element (any wxWindow) under the panel, not just wxPanels.
+    std::function<void(wxWindow*, const std::string&, int)> log_elements;
+    log_elements = [&](wxWindow* parent, const std::string& parent_path, int depth) {
+        int child_index = 0;
+        for (wxWindowList::compatibility_iterator node = parent->GetChildren().GetFirst(); node; node = node->GetNext()) {
+            auto* child = node->GetData();
+            if (!child) {
+                continue;
+            }
+
+            const std::string class_name = wxString(child->GetClassInfo()->GetClassName()).ToStdString();
+            const std::string child_path = parent_path + "/" + class_name + "[" + std::to_string(child_index++) + "]";
+            const wxPoint screen_pos = child->ClientToScreen(wxPoint(0, 0));
+            const wxPoint detail_pos = mutable_this->ScreenToClient(screen_pos);
+            std::ostringstream element;
+            element << "element_path=" << child_path << " depth=" << depth << " class=" << class_name
+                    << " id=" << child->GetId() << " shown=" << child->IsShown()
+                    << " parent_pos=" << log_point(child->GetPosition())
+                    << " detail_pos=" << log_point(detail_pos) << " screen_pos=" << log_point(screen_pos)
+                    << " size=" << log_size(child->GetSize()) << " best=" << log_size(child->GetBestSize())
+                    << " min=" << log_size(child->GetMinSize());
+            log_device_detail_layout(element.str());
+
+            log_elements(child, child_path, depth + 1);
+        }
+    };
+    log_elements(mutable_this, "DeviceDetail", 1);
 }
 
 G3UDetail::G3UDetail(wxWindow* parent)
@@ -626,7 +861,7 @@ void G3UDetail::create_panel(wxWindow* parent)
     m_panel_separotor10->SetBackgroundColour(wxColour(255, 255, 255));
 #ifdef __WIN32__
     m_panel_separotor10->SetMinSize(wxSize(-1, FromDIP(10)));
-#else if __APPLE__
+#elif defined(__APPLE__)
     m_panel_separotor10->SetMinSize(wxSize(-1, FromDIP(10)));
 #endif
 
@@ -653,7 +888,7 @@ void G3UDetail::create_panel(wxWindow* parent)
     bSizer_first_row->Add(b1Sizer_h);
 #ifdef __WIN32__
     bSizer_first_row->AddSpacer(FromDIP(14));
-#else if __APPLE__
+#elif defined(__APPLE__)
     bSizer_first_row->AddSpacer(FromDIP(12));
 #endif
 
@@ -723,7 +958,7 @@ void G3UDetail::create_panel(wxWindow* parent)
     sizer->Add(bSizer_h, 0, wxALL, 0);
 #ifdef __WIN32__
     sizer->AddSpacer(FromDIP(43));
-#else if __APPLE__
+#elif defined(__APPLE__)
     sizer->AddSpacer(FromDIP(46));
 #endif
 
@@ -825,10 +1060,8 @@ FileItem::FileItem(wxWindow* parent, const FileData& data)
       m_data(data) 
 {
     //create_panel(parent);
-    int width = FromDIP(850), height = FromDIP(44);
-    SetMinSize(wxSize(width, height));
-    SetMaxSize(wxSize(width, height));
-    SetSize(wxSize(width, height));
+    const int height = FromDIP(44);
+    SetMinSize(wxSize(0, height));
     Bind(wxEVT_ENTER_WINDOW, &FileItem::on_mouse_enter, this);
     Bind(wxEVT_LEAVE_WINDOW, &FileItem::on_mouse_leave, this);
     Bind(wxEVT_LEFT_UP, &FileItem::on_mouse_left_up, this);
@@ -1023,16 +1256,23 @@ void FileItem::on_mouse_left_up(wxMouseEvent& evt)
 
 SingleDeviceState::SingleDeviceState(wxWindow* parent, wxWindowID id, const wxPoint& pos, 
         const wxSize& size, long style, const wxString& name)
-        : wxScrolledWindow(parent, id, pos, size, wxHSCROLL | wxVSCROLL)
+        : wxScrolledWindow(parent, id, pos, size, wxVSCROLL)
         , m_cur_printing_ctrl(0)
         , m_download_tool(5, 15000)
         , m_download_title_image_task_id(FFDownloadTool::InvalidTaskId)
 {
-    this->SetScrollRate(30, 30);
+    this->SetScrollRate(0, 30);
+    // Keep the vertical scrollbar gutter reserved. At display sizes such as
+    // 1920x1080 the time-lapse panel can put the page exactly on the scrolling
+    // threshold: showing the scrollbar narrows the camera, the camera then gets
+    // shorter, and the scrollbar disappears again. A stable gutter breaks this
+    // width/height feedback loop and prevents the video panel from oscillating.
+    ShowScrollbars(wxSHOW_SB_DEFAULT, wxSHOW_SB_ALWAYS);
     this->SetBackgroundColour(wxColour(240, 240, 240));
     setupLayout();
     connectEvent();
     reInit();
+    setDevicePageState(DevicePageState::NoDevice);
 }
 
 SingleDeviceState::~SingleDeviceState()
@@ -1043,6 +1283,7 @@ SingleDeviceState::~SingleDeviceState()
 void SingleDeviceState::setCurId(int curId)
 { 
     if (curId < 0) {
+        setDevicePageState(DevicePageState::NoDevice);
         return;
     }
     if (curId != m_cur_id) {
@@ -1051,7 +1292,7 @@ void SingleDeviceState::setCurId(int curId)
         m_curId_first_Click_fileList = true;
         m_status_check_message_show_time = 0;
         m_status_check_error_code.clear();
-    } 
+    }
     {
         if (m_idle_tempMixDevice && !m_idle_tempMixDevice->IsShown()) {
             m_panel_print_btn->Hide();
@@ -1069,7 +1310,9 @@ void SingleDeviceState::setCurId(int curId)
         }
     }
     m_cur_id = curId;
-    m_camera_panel->setCurComId(curId);
+    m_device_page_state = DevicePageState::Connected;
+    // 切换设备：把摄像头视频流切换到当前设备（首次绑定亦走此处，comId != m_camera_cur_id 即触发）�?
+    switchCameraStreamTo(curId);
     m_busy_device_detial->setCurId(curId);
     m_busy_G3U_detail->setCurId(curId);
     m_busy_circula_filter->setCurId(curId);
@@ -1085,29 +1328,28 @@ void SingleDeviceState::setCurId(int curId)
     bool  valid = false;
     const com_dev_data_t &data  = MultiComMgr::inst()->devData(m_cur_id, &valid);
     if (!valid) {
-        setPageOffline();
+        setDevicePageState(DevicePageState::NoDevice);
         return;
     }
     unsigned short curr_pid = 0;
     if (data.connectMode == COM_CONNECT_LAN) {
         m_cur_serial_number = data.lanDevInfo.serialNumber;
         curr_pid            = data.lanDevInfo.pid;
-        m_fileListbutton->SetMinSize((wxSize(FromDIP(680 + 5), FromDIP(69))));
+        //m_fileListbutton->SetMinSize((wxSize(FromDIP(680 + 5), FromDIP(69))));
         m_timeLapseVideoBtn->Show(false);
     } else if (data.connectMode == COM_CONNECT_WAN) {
         m_cur_serial_number = data.wanDevInfo.serialNumber;
         curr_pid            = data.devDetail->pid;
-        m_fileListbutton->SetMinSize((wxSize(FromDIP(680 / 2), FromDIP(69))));
-        m_timeLapseVideoBtn->Show(true);
+        //m_fileListbutton->SetMinSize((wxSize(FromDIP(680 / 2), FromDIP(69))));
+        m_timeLapseVideoBtn->Show(data.devDetail->camera == 1);
     }
 
     // 根据机型判断是否支持四色打印，并设置currID
     std::string modelId = FFUtils::getPrinterModelId(curr_pid);
     bool        isPrinterSupportAms          = FFUtils::isPrinterSupportAms(curr_pid);
-    bool        isPrinterSupportCoolingFan   = FFUtils::isPrinterSupportCoolingFan(curr_pid);
     bool        isPrinterSupportDeviceFilter = FFUtils::isPrinterSupportDeviceFilter(curr_pid);
     m_isNozzlesPrinter                       = FFUtils::isNozzlesPrinter(curr_pid);
-    MaterialDialog::set_cur_id(curr_pid);
+    MaterialDialog::set_printer_type(curr_pid);
     if (m_isNozzlesPrinter) {
         m_print_check_bmp->Show();
         m_print_check_label->Show();
@@ -1115,22 +1357,28 @@ void SingleDeviceState::setCurId(int curId)
     } else {
         m_print_check_bmp->Hide();
         m_print_check_label->Hide();
-        m_material_station->show_material_panel(curr_pid);
+        // m_material_station->show_material_panel(curr_pid);
         if (isPrinterSupportAms) {
+            m_material_station->show_material_panel(curr_pid);
             m_material_station->setCurId(m_cur_id);
+            m_material_station->Show();
+        } else{
+            m_material_station->Hide();
         }
     }
-	m_busy_device_detial->setCoolingFanShow(isPrinterSupportCoolingFan);
-    if (!isPrinterSupportDeviceFilter) {
-        m_filter_button->Hide();
-        m_idle_device_info_button->Show();
-    } else {
-        m_filter_button->Show();
-        m_idle_device_info_button->Hide();
-        m_filter_button->Enable(isPrinterSupportDeviceFilter);
-        m_filter_button->SetIcon(isPrinterSupportDeviceFilter ? "device_filter" : "device_filter_offline");
-    }
+    m_busy_device_detial->updateGridSizer(curr_pid);
+    // Basic device information (model, nozzle, firmware, serial number, etc.)
+    // is available for every connected printer, so its entry must never be
+    // replaced by the optional filter entry.
+    m_idle_device_info_button->Show();
 
+    // Filter control is an additional capability. Show it only for printers
+    // that support it, while keeping the device-information entry available.
+    m_filter_button->Show(isPrinterSupportDeviceFilter);
+    m_filter_button->Enable(isPrinterSupportDeviceFilter);
+    if (isPrinterSupportDeviceFilter) {
+        m_filter_button->SetIcon("device_filter");
+    }
     changeMachineType(data.devDetail->pid);
     m_idle_tempMixDevice->changeMachineType(data.devDetail->pid);
     reInitPage();
@@ -1146,6 +1394,67 @@ void SingleDeviceState::reInit()
     reInitUI();
 }
 
+void SingleDeviceState::clearCurrentDevice()
+{
+    m_cur_id = ComInvalidId;
+    m_cur_serial_number.clear();
+    m_cur_dev_name.clear();
+    m_cur_dev_location.clear();
+    m_cur_dev_state.clear();
+    m_cur_print_file_name.clear();
+    m_status_check_error_code.clear();
+    m_status_check_message_show_time = 0;
+
+    if (m_staticText_device_name) {
+        m_staticText_device_name->SetLabel(wxEmptyString);
+        m_staticText_device_name->UnsetToolTip();
+    }
+    if (m_staticText_device_position) {
+        m_staticText_device_position->SetLabel(wxEmptyString);
+        m_staticText_device_position->UnsetToolTip();
+    }
+    if (m_busy_device_info) {
+        m_busy_device_info->SetDeviceInfo(wxEmptyString, wxEmptyString, wxEmptyString, wxEmptyString,
+                                          wxEmptyString, wxEmptyString, wxEmptyString, wxEmptyString);
+        m_busy_device_info->Hide();
+    }
+
+    reInitMaterialPic();
+    clearFileList();
+    m_curSelectedFileItem = nullptr;
+    m_curId_first_Click_fileList = true;
+
+    if (m_busy_device_detial) m_busy_device_detial->setCurId(ComInvalidId);
+    if (m_busy_G3U_detail) m_busy_G3U_detail->setCurId(ComInvalidId);
+    if (m_busy_circula_filter) m_busy_circula_filter->setCurId(ComInvalidId);
+    if (m_idle_tempMixDevice) m_idle_tempMixDevice->setCurId(ComInvalidId);
+    if (m_idle_lamp_bar) m_idle_lamp_bar->SetCurId(ComInvalidId);
+    if (m_busy_lamp_bar) m_busy_lamp_bar->SetCurId(ComInvalidId);
+    if (m_timeLapseVideoPnl) m_timeLapseVideoPnl->setComId(ComInvalidId);
+    if (m_tempCtrl_panel) m_tempCtrl_panel->ReInitTempature(ComInvalidId);
+
+    if (m_print_check_bmp) m_print_check_bmp->Hide();
+    if (m_print_check_label) m_print_check_label->Hide();
+    if (m_filter_button) m_filter_button->Hide();
+}
+
+void SingleDeviceState::setDevicePageState(DevicePageState state)
+{
+    m_device_page_state = state;
+    if (state != DevicePageState::NoDevice) return;
+
+    Freeze();
+    clearCurrentDevice();
+    reInitUI();
+    // m_staticText_device_tip->SetLabel(_L("No device connected"));
+    m_machine_idle_info_panel->Hide();
+    m_machine_ctrl_info_panel->Hide();
+    m_machine_idle_panel->Hide();
+    m_machine_ctrl_panel->Hide();
+    Layout();
+    Thaw();
+}
+
 void SingleDeviceState::reInitData() 
 { 
     m_last_speed               = 0.00001;
@@ -1155,7 +1464,9 @@ void SingleDeviceState::reInitData()
     m_last_chamber_fan_speed   = 0.00001;
     m_right_target_temp        = 0.00001;
     m_plat_target_temp         = 0.00001;
-    m_camera_stream_url.clear();
+    // 注意：m_camera_stream_url 现在跟随“摄像头绑定设备�?m_camera_cur_id)，与页面选中设备解耦，
+    // 不能�?reInitData（每�?setCurId/离线都会调）里清空，否则会打断“切设备画面保持不变”�?
+    // 仅在点摄像头按钮重绑设备时（activateCameraForCurrentDevice）才清空�?
     m_file_pic_url.clear();
     m_file_pic_name.clear();
     m_cur_dev_state.clear();
@@ -1179,7 +1490,7 @@ void SingleDeviceState::reInitUI()
     }
     m_staticText_device_info->Hide();
     m_clear_button->Hide();
-    m_staticText_idle->SetLabel(_L("Device offline"));
+    setIdlePrinterText(true);
     m_idle_tempMixDevice->modifyTemp("/", "/", "/");
     m_idle_tempMixDevice->setState(0);
     m_idle_lamp_bar->SetLampState(true, false);
@@ -1201,10 +1512,6 @@ void SingleDeviceState::reInitMaterialPic()
 
 void SingleDeviceState::reInitPage() 
 { 
-    if (m_monitor_panel) {
-        m_monitor_panel->Show();
-    }
-
     if (m_material_station) {
         showMaterialStation(true);
         m_scrolledWindow->Hide();
@@ -1497,7 +1804,10 @@ void SingleDeviceState::setDisabledExtruderCtrl(bool b)
 wxBoxSizer* SingleDeviceState::create_machine_info_page() 
 { 
     wxBoxSizer* bSizer_right = new wxBoxSizer(wxVERTICAL);
-    bSizer_right->SetMinSize(wxSize(FromDIP(680), -1));
+    // Keep both columns inside a 1920x1080 client area at 125% Windows scaling.
+    // The horizontal sizer still expands this column on wider displays.
+    constexpr int machine_column_min_width = 580;
+    bSizer_right->SetMinSize(wxSize(FromDIP(machine_column_min_width), -1));
     // 标题：信息与控制
     auto panel_control_title = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(49)), wxTAB_TRAVERSAL);
     panel_control_title->SetBackgroundColour(wxColour(248, 248, 248));
@@ -1528,7 +1838,7 @@ wxBoxSizer* SingleDeviceState::create_machine_info_page()
 
     // 添加标题
     bSizer_right->Add(panel_control_title, 0, wxALL | wxEXPAND, 0);
-    // 忙碌状态
+    // 忙碌状�?
     m_machine_ctrl_info_panel = new wxPanel(this);
     m_machine_ctrl_info_panel->SetBackgroundColour(*wxWHITE);
     m_machine_ctrl_info_panel->SetDoubleBuffered(true);
@@ -1539,7 +1849,7 @@ wxBoxSizer* SingleDeviceState::create_machine_info_page()
     m_machine_ctrl_info_panel->Layout();
     bSizer_v_busy->Fit(m_machine_ctrl_info_panel);
 
-    // 空闲状态
+    // 空闲状�?
     m_machine_idle_info_panel = new wxPanel(this);
     // m_machine_idle_panel->SetBackgroundColour(*wxWHITE);
     m_machine_idle_info_panel->SetDoubleBuffered(true);
@@ -1584,17 +1894,20 @@ wxBoxSizer* SingleDeviceState::create_monitoring_page(wxPanel* parent)
     //sizer->Add(m_panel_monitoring_title, 0, wxEXPAND | wxALL, 0);
 
     //播放控件
-    m_camera_panel = new PrinterCameraPanel(parent);
-    m_camera_panel->setSize(wxSize(FromDIP(1), FromDIP(1)));
-    m_camera_panel->Hide();
-    if (m_idle_lamp_bar) {
-        m_idle_lamp_bar->BindCamera(m_camera_panel);
-    }
-    if (m_busy_lamp_bar) {
-        m_busy_lamp_bar->BindCamera(m_camera_panel);
-    }
-    sizer->Add(m_camera_panel, 0, wxALL, 0);
-    sizer->AddStretchSpacer();
+    // 宽度随左栏横�?EXPAND（视频右边缘与下方“信息与控制”窗口对齐）；高度不再固定为 400�?
+    // 而是�?FFRTMPVideoCtrl::OnSize 按“实际宽�?/ 摄像头宽高比 + 状态条高”动态设定，
+    // 使“画面区”正好等于摄像头比例 —�?画面既不裁也不留黑边，画面与状态条纵向拼接�?
+    // 设备遥测刷新不改变左栏宽度，故高度稳定、不会抖动�?
+    m_camera_panel = new FFRTMPVideoCtrl(parent);
+    m_camera_panel->setSize(wxSize(-1, FromDIP(466)));  // 解除宽度上限，允许横�?EXPAND
+    //m_camera_panel->Hide();
+    //if (m_idle_lamp_bar) {
+    //    m_idle_lamp_bar->BindCamera(m_camera_panel);
+    //}
+    //if (m_busy_lamp_bar) {
+    //    m_busy_lamp_bar->BindCamera(m_camera_panel);
+    //}
+    sizer->Add(m_camera_panel, 0, wxALL | wxEXPAND, 0);
     return sizer;
 }
 
@@ -1627,7 +1940,7 @@ wxBoxSizer* SingleDeviceState::create_machine_control_title()
     m_staticText_device_info->SetFontDisableColor(wxColour("#FB4747"));
     m_staticText_device_info->SetMinSize(wxSize(FromDIP(432), FromDIP(45)));
 
-    bSizer_h_title->Add(m_staticText_device_info, 0, wxALL, 0);
+    bSizer_h_title->Add(m_staticText_device_info, 1, wxALL, 0);
     bSizer_h_title->AddSpacer(FromDIP(14));
 
     //显示清除按钮
@@ -1646,7 +1959,7 @@ wxBoxSizer* SingleDeviceState::create_machine_control_title()
         Layout();
     });
 
-    bSizer_h_title->Add(m_clear_button, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, 0);
+    bSizer_h_title->Add(m_clear_button, 0, wxALIGN_CENTER_VERTICAL | wxALL , 0);
 
     panel_top_right_info->SetSizer(bSizer_h_title);
     panel_top_right_info->Layout();
@@ -1669,7 +1982,7 @@ wxBoxSizer* SingleDeviceState::create_machine_control_title()
 wxBoxSizer* SingleDeviceState::create_machine_control_page()
 {
     wxBoxSizer *bSizer_right = new wxBoxSizer(wxVERTICAL);
-    bSizer_right->SetMinSize(wxSize(FromDIP(491), -1));
+    //bSizer_right->SetMinSize(wxSize(FromDIP(621), -1));
 
     auto panel_control_title2 = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(49)), wxTAB_TRAVERSAL);
     panel_control_title2->SetBackgroundColour(wxColour(248, 248, 248));
@@ -1684,7 +1997,6 @@ wxBoxSizer* SingleDeviceState::create_machine_control_page()
 
     panel_control_title2->SetSizer(bSizer_control_title);
     panel_control_title2->Layout();
-    bSizer_control_title->Fit(panel_control_title2);
 
     // 添加标题
     bSizer_right->Add(panel_control_title2, 0, wxALL | wxEXPAND, 0);
@@ -1692,15 +2004,23 @@ wxBoxSizer* SingleDeviceState::create_machine_control_page()
     m_tempCtrl_panel = new NewTempInputPanel(this);
     bSizer_right->Add(m_tempCtrl_panel, 0, wxALL | wxEXPAND, 0);
 
+    // 相机垂直布局中的材料�?
+    m_material_station = new MaterialStation(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(255)));
+    m_nozzles = new FFNozzles(this);
+    auto mat_sizer     = new wxBoxSizer(wxVERTICAL);
+    mat_sizer->Add(m_material_station, 0, wxTOP | wxEXPAND, FromDIP(14));
+    mat_sizer->Add(m_nozzles, 0, wxTOP | wxEXPAND, FromDIP(14));
+    bSizer_right->Add(mat_sizer, 0, wxEXPAND, 0);
+    m_nozzles->Hide();
 
-    //***添加温度布局和灯布局之间的间隔
+    //***添加材料布局和灯布局之间的间�?
     auto m_panel_separotor6 = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_separotor6->SetBackgroundColour(wxColour(240, 240, 240));
-    m_panel_separotor6->SetMinSize(wxSize(-1, FromDIP(8)));
-    m_panel_separotor6->SetMaxSize(wxSize(-1, FromDIP(8)));
+    m_panel_separotor6->SetMinSize(wxSize(-1, FromDIP(14)));
+    m_panel_separotor6->SetMaxSize(wxSize(-1, FromDIP(14)));
     bSizer_right->Add(m_panel_separotor6, 0, wxEXPAND, 0);
 
-    //忙碌状态
+    //忙碌状�?
     m_machine_ctrl_panel = new wxPanel(this);
     m_machine_ctrl_panel->SetBackgroundColour(*wxWHITE);
     m_machine_ctrl_panel->SetDoubleBuffered(true);
@@ -1709,9 +2029,8 @@ wxBoxSizer* SingleDeviceState::create_machine_control_page()
 
     m_machine_ctrl_panel->SetSizer(bSizer_v_busy);
     m_machine_ctrl_panel->Layout();
-    bSizer_v_busy->Fit(m_machine_ctrl_panel);
         
-    //空闲状态
+    //空闲状�?
     m_machine_idle_panel = new wxPanel(this);
     //m_machine_idle_panel->SetBackgroundColour(*wxWHITE);
     m_machine_idle_panel->SetDoubleBuffered(true);
@@ -1720,7 +2039,6 @@ wxBoxSizer* SingleDeviceState::create_machine_control_page()
 
     m_machine_idle_panel->SetSizer(bSizer_v_idle);
     m_machine_idle_panel->Layout();
-    bSizer_v_idle->Fit(m_machine_idle_panel);
 //***
     bSizer_right->Add(m_machine_ctrl_panel,  0, wxEXPAND, 0);
     bSizer_right->Add(m_machine_idle_panel, 0, wxEXPAND, 0);
@@ -1737,7 +2055,12 @@ void SingleDeviceState::showMaterialStation(bool show)
             m_material_station->Hide();
         } else {
             m_nozzles->Hide();
-            m_material_station->Show();
+            
+            if (FFUtils::isPrinterSupportAms(FFUtils::getPid(m_cur_id))) {
+                m_material_station->Show();
+            } else {
+                m_material_station->Hide();
+            }
         }
     } else {
         m_nozzles->Hide();
@@ -1745,12 +2068,38 @@ void SingleDeviceState::showMaterialStation(bool show)
     }
 }
 
+void SingleDeviceState::trackBtnClick(std::string str)
+{
+    std::string eventType = "widget";
+    std::string eventName = "widget_click";
+    std::string uuid      = boost::uuids::to_string(boost::uuids::random_generator()());
+    uuid.erase(std::remove(uuid.begin(), uuid.end(), '-'), uuid.end());
+    std::string timestamp                     = FFUtils::getTimestampMsStr();
+
+    std::string uid, did, sid;
+    wxGetApp().get_uds_id(uid, did, sid);
+    com_tracking_common_data_t commonData;
+    commonData.uid = uid;
+    commonData.did = did;
+    commonData.sid = sid;
+
+    com_tracking_event_data_t eventData;
+    eventData.eventType = eventType;
+    eventData.eventId   = (boost::format("%s_%s_%s") % eventName % timestamp % uuid).str();
+    eventData.eventName = eventName;
+    eventData.pageId    = "device_monitor";
+    eventData.objectId  = str;
+    eventData.timestamp = timestamp;
+
+    MultiComHelper::inst()->reportTrackingData(commonData, eventData, ComTimeoutWanB);
+}
+
 void SingleDeviceState::setupLayout()
 {
- //最外层框架布局
+    //最外层框架布局
     wxBoxSizer *bSizer_status = new wxBoxSizer(wxVERTICAL);
 
-    //顶部背景条（作为间距）
+    //顶部背景条（作为间距�?
     auto m_panel_separotor_top_back = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(14)), wxTAB_TRAVERSAL);
     m_panel_separotor_top_back->SetBackgroundColour(wxColour(240,240,240));
     bSizer_status->Add(m_panel_separotor_top_back, 0, wxEXPAND | wxALL, 0);
@@ -1772,45 +2121,38 @@ void SingleDeviceState::setupLayout()
     //机器上方状态栏
     auto m_machine_status = create_machine_status_page();
     bSizer_left->Add(m_machine_status, 0, wxALL | wxEXPAND, 0);
-    
+
+    // 相机布局
+    m_monitor_panel = new wxPanel(this);
+    auto m_monitoring_sizer = create_monitoring_page(m_monitor_panel);
+    m_monitor_panel->SetSizer(m_monitoring_sizer);
+    m_monitor_panel->Layout();
+    bSizer_left->Add(m_monitor_panel, 0, wxALL | wxEXPAND, 0);
+
     // 信息与控制详情页
     auto m_machine_control = create_machine_info_page();
-    bSizer_left->Add(m_machine_control, 0, wxALL, 0);
+    bSizer_left->Add(m_machine_control, 0, wxTOP | wxEXPAND, FromDIP(13));
 
-    //相机垂直布局中的材料站
-    //MaterialStation高度指定为FromDIP(274)对应实际像素411，为与ui保持相同的宽高比
-    m_material_station = new MaterialStation(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(255)));
-    bSizer_left->Add(m_material_station, 0, wxALL | wxEXPAND, 0);
-    m_nozzles = new FFNozzles(this);
-    bSizer_left->Add(m_nozzles, 0, wxALL, 0);
-    m_nozzles->Hide();
-    bSizer_status_below->Add(bSizer_left, 0, wxALL | wxEXPAND, 0);
+    bSizer_status_below->Add(bSizer_left, 1, wxALL, 0);
 
     //中间间隔
     auto m_panel_separator_middle = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxTAB_TRAVERSAL);
     m_panel_separator_middle->SetBackgroundColour(wxColour(240, 240, 240));
-    m_panel_separator_middle->SetMinSize(wxSize(FromDIP(16), -1));
+    m_panel_separator_middle->SetMinSize(wxSize(FromDIP(14), -1));
 
     bSizer_status_below->Add(m_panel_separator_middle, 0, wxEXPAND | wxALL, 0);
 
     //右侧信息
-    //标题栏
+    //标题�?
     auto m_machine_title = create_machine_control_title();
     
     //设备控制
     auto m_machine_ctrl = create_machine_control_page();
 
-    // 相机布局
-    m_monitor_panel         = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(270)));
-    auto m_monitoring_sizer = create_monitoring_page(m_monitor_panel);
-    m_monitor_panel->SetSizer(m_monitoring_sizer);
-    m_monitor_panel->Layout();
-    m_monitoring_sizer->Fit(m_monitor_panel);
-    m_machine_title->Add(m_machine_ctrl, 0, wxALL, 0);
-    m_machine_title->Add(m_monitor_panel, 0, wxALL, 0);
-    bSizer_status_below->Add(m_machine_title, 0, wxALL, 0);
+    m_machine_title->Add(m_machine_ctrl, 0, wxALL | wxEXPAND, 0);
+    bSizer_status_below->Add(m_machine_title, 1, wxALL | wxEXPAND, 0);
     //水平布局最右侧间隔
-    auto panel_separator_right = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(28), -1), wxTAB_TRAVERSAL);
+    auto panel_separator_right = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(13), -1), wxTAB_TRAVERSAL);
     panel_separator_right->SetBackgroundColour(wxColour(240, 240, 240));
 
     bSizer_status_below->Add(panel_separator_right, 0, wxEXPAND | wxALL, 0);
@@ -1822,14 +2164,15 @@ void SingleDeviceState::setupLayout()
     panel_separotor_bottom->SetBackgroundColour(wxColour(240, 240, 240));
 
     bSizer_status->Add(panel_separotor_bottom, 0, wxEXPAND | wxALL, 0);
-    this->SetSizerAndFit(bSizer_status);
+    this->SetSizer(bSizer_status);
     this->Layout();
+    Bind(wxEVT_SIZE, &SingleDeviceState::OnScrollWinSize, this);
+    UpdateScrollVirtualSize();
 }
 
 wxBoxSizer* SingleDeviceState::create_machine_status_page()
 {
     wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-    sizer->SetMinSize(wxSize(FromDIP(680), -1));
     // 水平布局
     wxBoxSizer* bSizer_title_label = new wxBoxSizer(wxHORIZONTAL);
     auto        panel_top_title    = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(18)), wxTAB_TRAVERSAL);
@@ -1843,7 +2186,7 @@ wxBoxSizer* SingleDeviceState::create_machine_status_page()
     bSizer_title_label->Add(m_staticText_device_name, 0, wxALIGN_LEFT | wxALL, 0);
     bSizer_title_label->AddStretchSpacer();
 
-    // 显示设备所在货架
+    // 显示设备所在货�?
     m_staticText_device_position = new Label(panel_top_title, Label::Body_13, (""));
     m_staticText_device_position->SetMinSize(wxSize(FromDIP(220), -1));
     m_staticText_device_position->SetMaxSize(wxSize(FromDIP(220), -1));
@@ -1867,12 +2210,12 @@ wxBoxSizer* SingleDeviceState::create_machine_status_page()
     sizer->Add(panel_top_title, 0, wxEXPAND | wxALL, 0);
     sizer->AddSpacer(FromDIP(3));
 
-    // 添加白色分割条
+    // 添加白色分割�?
     auto m_panel_separotor_top = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(3)), wxTAB_TRAVERSAL);
     m_panel_separotor_top->SetBackgroundColour(wxColour(255, 255, 255));
     sizer->Add(m_panel_separotor_top, 0, wxEXPAND | wxALL, 0);
 
-    // 第二段水平布局，相机垂直布局的顶部间隔
+    // 第二段水平布局，相机垂直布局的顶部间�?
     auto m_panel_separotor0 = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_separotor0->SetBackgroundColour(wxColour(240, 240, 240));
     m_panel_separotor0->SetMinSize(wxSize(-1, FromDIP(8)));
@@ -1887,7 +2230,7 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
 {
     ///********
     // 先垂直布局（添加空白间距）
-    // 再水平布局（1、添加左侧空白间距；2、添加中间垂直布局，3、添加右侧垂直布局）
+    // 再水平布局�?、添加左侧空白间距；2、添加中间垂直布局�?、添加右侧垂直布局�?
     // 最终添加至整体布局
 
     wxBoxSizer* bSizer_file_info = new wxBoxSizer(wxVERTICAL);
@@ -1916,30 +2259,34 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
     // auto m_panel_control_file_info = new wxPanel(m_panel_control_info, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(145)), wxTAB_TRAVERSAL);
     auto m_panel_control_file_info = new wxPanel(m_panel_control_info, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_control_file_info->SetBackgroundColour(wxColour(255, 255, 255));
+    m_panel_control_file_info->SetMinSize(wxSize(FromDIP(PRINT_FILE_INFO_WIDTH), -1));
 
     // 文件信息
     wxBoxSizer* bSizer_control_file_name = new wxBoxSizer(wxHORIZONTAL);
     auto m_panel_control_file_name = new wxPanel(m_panel_control_file_info, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_control_file_name->SetBackgroundColour(wxColour(255, 255, 255));
+    m_panel_control_file_name->SetMinSize(wxSize(FromDIP(PRINT_FILE_INFO_WIDTH), -1));
 
     // 显示文件标题
     m_staticText_file_head = new Label(m_panel_control_file_name, _L("file: "));
     m_staticText_file_head->SetForegroundColour(wxColour(51, 51, 51));
     m_staticText_file_head->SetFont(Label::sysFont(16, false));
+    const int file_head_width = m_staticText_file_head->GetTextExtent(_L("file: ")).x + FromDIP(PRINT_FILE_HEAD_WIDTH_PADDING);
+    m_staticText_file_head->SetMinSize(wxSize(file_head_width, -1));
+    m_staticText_file_head->SetMaxSize(wxSize(file_head_width, -1));
 
     // 显示文件名称
-    m_staticText_file_name = new wxStaticText(m_panel_control_file_name, wxID_ANY, "");
+    m_staticText_file_name = new wxStaticText(m_panel_control_file_name, wxID_ANY, "", wxDefaultPosition,
+                                              wxSize(FromDIP(PRINT_FILE_NAME_WIDTH), -1));
     m_staticText_file_name->SetForegroundColour(wxColour(51, 51, 51));
     m_staticText_file_name->SetFont(Label::sysFont(16, false));
+    m_staticText_file_name->SetMinSize(wxSize(FromDIP(PRINT_FILE_NAME_WIDTH), -1));
+    m_staticText_file_name->SetMaxSize(wxSize(FromDIP(PRINT_FILE_NAME_WIDTH), -1));
 
-    bSizer_control_file_name->Add(m_staticText_file_head);
-    bSizer_control_file_name->Add(m_staticText_file_name);
+    bSizer_control_file_name->Add(m_staticText_file_head, 0, wxALIGN_CENTER_VERTICAL);
+    bSizer_control_file_name->Add(m_staticText_file_name, 0, wxALIGN_CENTER_VERTICAL);
     m_panel_control_file_name->SetSizer(bSizer_control_file_name);
     m_panel_control_file_name->Layout();
-    bSizer_control_file_name->Fit(m_panel_control_file_name);
-
-    bSizer_control_file_info->Add(m_panel_control_file_name, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
-    bSizer_control_file_info->AddSpacer(FromDIP(24));
 
     //***添加材料质量
     auto material_weight_pic = create_scaled_bitmap("device_material_weight", this, FromDIP(11));
@@ -1950,43 +2297,66 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
     hbox->Add(m_material_weight_staticbitmap, 0, wxALIGN_CENTER | wxALL, 0);
     hbox->AddSpacer(FromDIP(4));
     hbox->Add(m_material_weight_label, wxALIGN_CENTER | wxALL, 0);
-    bSizer_control_file_info->Add(hbox, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 0);
-    bSizer_control_file_info->AddSpacer(FromDIP(30));
+
+    //显示云切片帮助文本
+    m_staticText_cloud_text = new Label(m_panel_control_file_info, Label::sysFont(22, false), _L("Cloud slicing queued..."));
+    m_staticText_cloud_text->Wrap(-1);
+    m_staticText_cloud_text->SetForegroundColour(wxColour(50, 141, 251));
+
+    //显示云切片排队状�?
+    auto cloud_sizer              = new wxBoxSizer(wxHORIZONTAL);
+    m_staticText_cloud_queue_text = new Label(m_panel_control_file_info, Label::sysFont(16, false), _L("Jobs ahead"));
+    m_staticText_cloud_queue_text->SetForegroundColour(wxColour("#999999"));
+    m_staticText_cloud_queue_count = new Label(m_panel_control_file_info, Label::sysFont(22, false), _L("0"));
+    m_staticText_cloud_queue_count->SetForegroundColour(wxColour(50, 141, 251));
+    cloud_sizer->Add(m_staticText_cloud_queue_text, 0, wxALIGN_BOTTOM, 0); 
+    cloud_sizer->Add(m_staticText_cloud_queue_count, 0, wxALIGN_BOTTOM | wxLEFT, FromDIP(5));
+
+    //显示排队后提示文�?
+    m_staticText_cloud_queue_tip = new Label(m_panel_control_file_info, Label::sysFont(16, false), _L("Starts slicing and printing once the queue clears."));
+    m_staticText_cloud_queue_tip->Wrap(-1);
+    m_staticText_cloud_queue_tip->SetForegroundColour(wxColour("#999999"));
     
-    // 显示倒计时
+    // 显示倒计�?
     wxString time           = "0" + _L("h ") + "0" + _L("min ");
     m_staticText_count_time = new Label(m_panel_control_file_info, Label::sysFont(22, false), time);
     m_staticText_count_time->Wrap(-1);
     // m_staticText_count_time->SetFont(wxFont(wxFontInfo(16)));
     m_staticText_count_time->SetForegroundColour(wxColour(50, 141, 251));
 
-    bSizer_control_file_info->Add(m_staticText_count_time, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
-    bSizer_control_file_info->AddSpacer(FromDIP(8));
-
     // 显示剩余时间标签
     m_staticText_time_label = new Label(m_panel_control_file_info, ::Label::sysFont(14, false), _L("Remaining Time"));
     m_staticText_time_label->SetForegroundColour(wxColour(153, 153, 153));
-
-    bSizer_control_file_info->Add(m_staticText_time_label, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
 
     auto m_panel_separotor_mid = new wxPanel(m_panel_control_file_info, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(20)),
                                              wxTAB_TRAVERSAL);
     m_panel_separotor_mid->SetBackgroundColour(wxColour(255, 255, 255));
 
-    bSizer_control_file_info->Add(m_panel_separotor_mid, 0, wxEXPAND | wxALL, 0);
-
-    // 显示进度条
+    // 显示进度�?
     m_progress_bar = new ProgressBar(m_panel_control_file_info, wxID_ANY, 100, wxDefaultPosition, wxSize(FromDIP(384), FromDIP(19)), true);
     m_progress_bar->SetProgress(30);
     m_progress_bar->SetVerticalSpace(FromDIP(5));
     m_progress_bar->SetFont(Label::Body_14);
     m_progress_bar->SetProgressBackgroundColour(wxColour(50, 141, 251));
-    bSizer_control_file_info->Add(m_progress_bar, 0, wxALIGN_CENTER_VERTICAL, FromDIP(3));
-    // bSizer_control_file_info->AddSpacer(FromDIP(6));
 
+    bSizer_control_file_info->Add(m_panel_control_file_name, 0, wxEXPAND | wxBOTTOM, FromDIP(3));
+    bSizer_control_file_info->AddSpacer(FromDIP(24));
+    bSizer_control_file_info->Add(hbox, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 0);
+    bSizer_control_file_info->AddStretchSpacer(1)->SetMinSize(-1, FromDIP(30));
+    bSizer_control_file_info->Add(m_panel_separotor_mid, 1, wxEXPAND | wxALL, 0);
+
+    wxBoxSizer* bottomSizer = new wxBoxSizer(wxVERTICAL);
+    bottomSizer->Add(m_staticText_cloud_text, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
+    bottomSizer->Add(cloud_sizer, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
+    bottomSizer->Add(m_staticText_cloud_queue_tip, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
+    bottomSizer->Add(m_staticText_count_time, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
+    bottomSizer->Add(m_staticText_time_label, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(3));
+    bottomSizer->Add(m_panel_separotor_mid, 0, wxEXPAND | wxALL, 0);
+    bottomSizer->Add(m_progress_bar, 0, wxALIGN_CENTER_VERTICAL, FromDIP(3));
+    bSizer_control_file_info->Add(bottomSizer, 0, wxEXPAND | wxALIGN_BOTTOM | wxBOTTOM, FromDIP(30));
     m_panel_control_file_info->SetSizer(bSizer_control_file_info);
     m_panel_control_file_info->Layout();
-    bSizer_control_file_info->Fit(m_panel_control_file_info);
+    //bSizer_control_file_info->Fit(m_panel_control_file_info);
 
     bSizer_control_info->Add(m_panel_control_file_info, 0, wxEXPAND | wxALL, 0);
     /*
@@ -1996,7 +2366,7 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
      
         bSizer_control_info->Add(m_panel_separotor_right, 0, wxEXPAND | wxALL, 0);
     */
-    bSizer_control_info->AddSpacer(FromDIP(90));
+    bSizer_control_info->AddStretchSpacer(1);
 
     //***添加右侧垂直布局
     wxBoxSizer* bSizer_control_material = new wxBoxSizer(wxVERTICAL);
@@ -2004,7 +2374,10 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
     m_panel_control_material->SetBackgroundColour(wxColour(255, 255, 255));
 
     m_busy_lamp_bar = new LampToolBar(m_panel_control_material);
-    bSizer_control_material->Add(m_busy_lamp_bar, 0, wxALIGN_RIGHT | wxRIGHT, 0);
+    auto lamp_bar_sizer = new wxBoxSizer(wxHORIZONTAL);
+    lamp_bar_sizer->AddStretchSpacer(1);
+    lamp_bar_sizer->Add(m_busy_lamp_bar, 0, wxALL, 0);
+    bSizer_control_material->Add(lamp_bar_sizer, 1, wxRIGHT | wxEXPAND, 0);
     m_material_picture = new MaterialImagePanel(m_panel_control_material);
     m_material_picture->SetMinSize(wxSize(FromDIP(102), FromDIP(102)));
     //bSizer_control_material->Add(hbox, 0, /*wxALIGN_CENTER*/ wxRIGHT | wxALL, 0);
@@ -2013,7 +2386,6 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
 
     m_panel_control_material->SetSizer(bSizer_control_material);
     m_panel_control_material->Layout();
-    bSizer_control_material->Fit(m_panel_control_material);
 
     bSizer_control_info->Add(m_panel_control_material);
 
@@ -2024,16 +2396,16 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
 
     bSizer_control_info->Add(m_panel_separotor_right2, 0, wxEXPAND | wxALL, 0);
 
-    bSizer_file_info->Add(bSizer_control_info, 0, wxEXPAND | wxALL, 0);
+    bSizer_file_info->Add(bSizer_control_info, 1, wxEXPAND | wxALL, 0);
 
     //**信息与控制布局添加至垂直布局
     m_panel_control_info->SetSizer(bSizer_file_info);
     m_panel_control_info->Layout();
-    bSizer_file_info->Fit(m_panel_control_info);
+    //bSizer_file_info->Fit(m_panel_control_info);
 
-    busySizer->Add(m_panel_control_info, 0, wxALL | wxEXPAND, 0);
+    busySizer->Add(m_panel_control_info, 1, wxALL | wxEXPAND, 0);
 
-    //****添加暂停打印、取消打印
+    //****添加暂停打印、取消打�?
     // 设备信息与打印按钮之间的间隔
     auto m_panel_separotor4 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_separotor4->SetBackgroundColour(wxColour(248, 248, 248));
@@ -2043,7 +2415,7 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
 
     //***打印布局
     wxBoxSizer* bSizer_control_print  = new wxBoxSizer(wxHORIZONTAL);
-    auto        m_panel_control_print = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(69)), wxTAB_TRAVERSAL);
+    m_panel_control_print = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(69)), wxTAB_TRAVERSAL);
     m_panel_control_print->SetBackgroundColour(wxColour(255, 255, 255));
     m_panel_control_print->SetMinSize(wxSize(FromDIP(680), FromDIP(69)));
     m_panel_control_print->SetMaxSize(wxSize(FromDIP(680), FromDIP(69)));
@@ -2056,7 +2428,7 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
     m_print_button->SetBackgroundColor(wxColour(255, 255, 255));
     m_print_button->SetBorderColor(wxColour(255, 255, 255));
     m_print_button->SetTextColor(wxColour(51, 51, 51));
-    m_print_button->SetMinSize(FromDIP(wxSize(336, 69)));
+    //m_print_button->SetMinSize(FromDIP(wxSize(336, 69)));
     //  m_print_button->SetMinSize((wxSize(FromDIP(158), FromDIP(29))));
     m_print_button->SetCornerRadius(0);
     m_print_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
@@ -2086,7 +2458,7 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
     });
 
     // bSizer_control_print->Add(m_print_button, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(4));
-    bSizer_control_print->Add(m_print_button, 0, wxLEFT | wxRIGHT, 0);
+    bSizer_control_print->Add(m_print_button, 1, wxLEFT | wxRIGHT | wxEXPAND, 0);
 
     auto m_panel_separotor_print = new wxPanel(m_panel_control_print, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(5), -1), wxTAB_TRAVERSAL);
     m_panel_separotor_print->SetBackgroundColour(wxColour(240, 240, 240));
@@ -2102,30 +2474,132 @@ void SingleDeviceState::setupLayoutBusyInfoPage(wxBoxSizer* busySizer, wxPanel* 
     m_cancel_button->SetBackgroundColor(wxColour(255, 255, 255));
     m_cancel_button->SetBorderColor(wxColour(255, 255, 255));
     m_cancel_button->SetTextColor(wxColour(51, 51, 51));
-    m_cancel_button->SetMinSize(FromDIP(wxSize(336, 69)));
+    //m_cancel_button->SetMinSize(FromDIP(wxSize(336, 69)));
     //  m_cancel_button->SetMinSize((wxSize(FromDIP(158), FromDIP(29))));
     m_cancel_button->SetCornerRadius(0);
     m_cancel_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
         // e.Skip();
         if (!m_cancel_confirm_page) {
-            m_cancel_confirm_page = new CancelPrint(_L("Whether Cancel Printing"), _L("yes"), _L("no"));
+            m_cancel_confirm_page = new CancelPrint(_L("Whether Cancel Printing"), _L("yes"), _L("no"), _L("Cancel print"));
             m_cancel_confirm_page->Bind(EVT_CANCEL_PRINT_CLICKED, &SingleDeviceState::onCancelPrint, this);
             m_cancel_confirm_page->Bind(EVT_CONTINUE_PRINT_CLICKED, &SingleDeviceState::onContinuePrint, this);
         }
         m_cancel_confirm_page->ShowModal();
+        trackBtnClick("cancel_print");
     });
 
     // bSizer_control_print->Add(m_cancel_button, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(4));
-    bSizer_control_print->Add(m_cancel_button, 0, wxLEFT | wxRIGHT, 0);
+    bSizer_control_print->Add(m_cancel_button, 1, wxLEFT | wxRIGHT | wxEXPAND, 0);
 
     //***继续打印布局添加至垂直布局
     m_panel_control_print->SetSizer(bSizer_control_print);
     m_panel_control_print->Layout();
-    bSizer_control_print->Fit(m_panel_control_print);
 
-    busySizer->Add(m_panel_control_print, 0, wxLEFT | wxRIGHT, 0);
+    busySizer->Add(m_panel_control_print, 0, wxLEFT | wxRIGHT | wxEXPAND, 0);
 
-    //***添加打印控制和温度布局之间的间隔
+    wxBoxSizer* cloud_btn_sizer  = new wxBoxSizer(wxHORIZONTAL);
+    m_panel_control_cloud = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(69)), wxTAB_TRAVERSAL);
+    m_panel_control_cloud->SetBackgroundColour(wxColour(255, 255, 255));
+    m_panel_control_cloud->SetMinSize(wxSize(-1, FromDIP(69)));
+    m_panel_control_cloud->SetMaxSize(wxSize(-1, FromDIP(69)));
+
+    m_retry_print_button = new Button(m_panel_control_cloud, _L("Reprint"), "refresh", 0, 16);
+    m_retry_print_button->SetFont(Label::sysFont(14, false));
+    m_retry_print_button->SetFlashForge(true);
+    m_retry_print_button->SetBorderWidth(0);
+    m_retry_print_button->SetBackgroundColor(wxColour(255, 255, 255));
+    m_retry_print_button->SetBorderColor(wxColour(255, 255, 255));
+    m_retry_print_button->SetTextColor(wxColour(51, 51, 51));
+    //m_retry_print_button->SetMinSize(FromDIP(wxSize(336, 69)));
+    m_retry_print_button->SetCornerRadius(0);
+    m_retry_print_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
+        e.Skip();
+        auto        detail = Slic3r::GUI::MultiComMgr::inst()->devData(m_cur_id).devDetail;
+        if (!detail) {
+            return;
+        }
+        std::string status = detail->status;
+        if (status != P_READY && status != P_CLOUD_SLICING) {
+            ErrorDialog dlg(wxGetApp().GetMainTopWindow(), _L("The printer is not idle"), false);
+            dlg.ShowModal();
+            wxGetApp().mainframe->jump_to_monitor(EVT_SWITCH_TO_DEVICE_LIST);
+        } else {
+            MultiComHelper::inst()->retrySliceTask(m_slice_task_id, ComTimeoutWanB);
+        }
+        trackBtnClick("reprint");
+        // m_print_button_pressed_down = !m_print_button_pressed_down;
+    });
+    m_cancel_queue_button = new Button(m_panel_control_cloud, _L("Cancel Queue"), "device_cancel_print", 0, 16);
+    m_cancel_queue_button->SetFont(Label::sysFont(14, false));
+    m_cancel_queue_button->SetFlashForge(true);
+    m_cancel_queue_button->SetBorderWidth(0);
+    m_cancel_queue_button->SetBackgroundColor(wxColour(255, 255, 255));
+    m_cancel_queue_button->SetBorderColor(wxColour(255, 255, 255));
+    m_cancel_queue_button->SetTextColor(wxColour(51, 51, 51));
+    //m_cancel_queue_button->SetMinSize(FromDIP(wxSize(680, 69)));
+    m_cancel_queue_button->SetCornerRadius(0);
+    m_cancel_queue_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
+        e.Skip();
+        auto        title = m_cancel_queue_button->GetLabel();
+        wxString    info;
+        std::string trackStr;
+        if (title == _L("Cancel Queue")) {
+            info = _L("Cancel queue?");
+            trackStr = "cancel_queue";
+        } else if (title == _L("Cancel Slicing")) {
+            info = _L("Cancel slicing?");
+            trackStr = "cancel_slice";
+        }
+        CancelPrint* dlg = new CancelPrint(info, _L("yes"), _L("no"), title);
+        dlg->Bind(EVT_CANCEL_PRINT_CLICKED, [=](wxCommandEvent& event) {
+            MultiComHelper::inst()->cancelSliceTask(m_slice_task_id, ComTimeoutWanB); 
+            dlg->Close();
+            dlg->Destroy();
+        });
+        dlg->Bind(EVT_CONTINUE_PRINT_CLICKED, [=](wxCommandEvent& event) { 
+            dlg->Close();
+            dlg->Destroy();
+        });
+        dlg->ShowModal();
+        if (!trackStr.empty())
+            trackBtnClick(trackStr);
+    });
+    m_cancel_slice_button = new Button(m_panel_control_cloud, _L("Cancel Slicing"), "device_cancel_print", 0, 16);
+    m_cancel_slice_button->SetFont(Label::sysFont(14, false));
+    m_cancel_slice_button->SetFlashForge(true);
+    m_cancel_slice_button->SetBorderWidth(0);
+    m_cancel_slice_button->SetBackgroundColor(wxColour(255, 255, 255));
+    m_cancel_slice_button->SetBorderColor(wxColour(255, 255, 255));
+    m_cancel_slice_button->SetTextColor(wxColour(51, 51, 51));
+    //m_cancel_slice_button->SetMinSize(FromDIP(wxSize(336, 69)));
+    m_cancel_slice_button->SetCornerRadius(0);
+    m_cancel_slice_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
+        e.Skip();
+        CancelPrint* dlg = new CancelPrint(_L("Cancel slicing?"), _L("yes"), _L("no"), _L("Cancel Slicing"));
+        dlg->Bind(EVT_CANCEL_PRINT_CLICKED, [=](wxCommandEvent& event) {
+            MultiComHelper::inst()->cancelSliceTask(m_slice_task_id, ComTimeoutWanB);
+            dlg->Close();
+            dlg->Destroy();
+        });
+        dlg->Bind(EVT_CONTINUE_PRINT_CLICKED, [=](wxCommandEvent& event) {
+            dlg->Close();
+            dlg->Destroy();
+        });
+        dlg->ShowModal();
+    });
+
+    m_cancel_slice_button->Hide();
+    m_retry_print_button->Hide();
+    cloud_btn_sizer->Add(m_cancel_queue_button, 1, wxLEFT | wxRIGHT | wxEXPAND, 0);
+    cloud_btn_sizer->Add(m_retry_print_button, 1, wxRIGHT | wxEXPAND, FromDIP(8));
+    cloud_btn_sizer->Add(m_cancel_slice_button, 1, wxLEFT | wxRIGHT | wxEXPAND, 0);
+
+    m_panel_control_cloud->SetSizer(cloud_btn_sizer);
+    m_panel_control_cloud->Layout();
+    m_panel_control_cloud->Hide();
+    busySizer->Add(m_panel_control_cloud, 0, wxLEFT | wxRIGHT | wxEXPAND, 0);
+
+    //***添加打印控制和温度布局之间的间�?
     auto m_panel_separotor5 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_separotor5->SetBackgroundColour(wxColour(240, 240, 240));
     m_panel_separotor5->SetMinSize(wxSize(-1, FromDIP(22)));
@@ -2144,31 +2618,32 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
     // 水平布局，机器图 + 文字
     wxBoxSizer* bSizer_h_device_tip  = new wxBoxSizer(wxHORIZONTAL);
     wxBoxSizer* bSizer_v_device_text = new wxBoxSizer(wxVERTICAL);
-    bSizer_v_device_text->SetMinSize(wxSize(FromDIP(411), FromDIP(205)));
+    bSizer_v_device_text->SetMinSize(-1, FromDIP(205));
     m_panel_idle                     = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_idle->SetBackgroundColour(*wxWHITE);
     m_panel_idle->SetMinSize(wxSize(-1, FromDIP(280)));
 
     auto idle_device_pic       = create_scaled_bitmap("adventurer_5m", 0, 200);
     m_idle_device_staticbitmap = new wxStaticBitmap(m_panel_idle, wxID_ANY, idle_device_pic);
-    m_staticText_idle          = new Label(m_panel_idle, Label::sysFont(16, false), _L(HAS_NO_PRINTING));
+    m_staticText_idle = new Label(
+        m_panel_idle, Label::sysFont(16, false), _L(HAS_NO_PRINTING), wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL);
     m_staticText_idle->SetForegroundColour(wxColour(51, 51, 51));
     m_staticText_idle->SetBackgroundColour(wxColour(255, 255, 255));
-    m_staticText_idle->SetWindowStyleFlag(wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL);
     m_idle_lamp_bar = new LampToolBar(m_panel_idle);
+    auto lamp_bar_sizer = new wxBoxSizer(wxHORIZONTAL);
+    lamp_bar_sizer->AddStretchSpacer(1);
+    lamp_bar_sizer->Add(m_idle_lamp_bar, 0, wxALL, 0);
     bSizer_h_device_tip->Add(m_idle_device_staticbitmap, 0, wxALL | wxEXPAND, 0);
     bSizer_h_device_tip->AddSpacer(FromDIP(22));
     bSizer_v_device_text->AddSpacer(FromDIP(27));
-    bSizer_v_device_text->Add(m_idle_lamp_bar, 0, wxALIGN_RIGHT | wxRIGHT, FromDIP(27));
+    bSizer_v_device_text->Add(lamp_bar_sizer, 0, wxRIGHT | wxEXPAND, FromDIP(27));
     bSizer_v_device_text->AddSpacer(FromDIP(64));
     bSizer_v_device_text->Add(m_staticText_idle, 0, wxALL, 0);
     bSizer_v_device_text->AddStretchSpacer();
-    bSizer_h_device_tip->Add(bSizer_v_device_text, 0, wxALIGN_CENTER_HORIZONTAL | wxALIGN_CENTER_VERTICAL | wxALL | wxEXPAND, 0);
-    bSizer_h_device_tip->AddStretchSpacer();
+    bSizer_h_device_tip->Add(bSizer_v_device_text, 1, wxALL | wxEXPAND, 0);
 
     m_panel_idle->SetSizer(bSizer_h_device_tip);
     m_panel_idle->Layout();
-    bSizer_h_device_tip->Fit(m_panel_idle);
 
     idleSizer->Add(m_panel_idle, 0, wxALL | wxEXPAND, 0);
 
@@ -2190,7 +2665,7 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
     m_busyState_bottom_gap->Hide();
     m_offline_info_page_gap->Hide();
 
-    //*** 设备空闲和文件列表间距
+    //*** 设备空闲和文件列表间�?
     // 添加空白间距
     auto m_panel_separotor2 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_separotor2->SetBackgroundColour(wxColour(240, 240, 240));
@@ -2201,7 +2676,7 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
 
     m_panel_idle_text = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(69)), wxTAB_TRAVERSAL);
     m_fileListbutton  = new Button(m_panel_idle_text, _L("Local File List"), "local_file_list", 0, 16);
-    m_fileListbutton->SetMinSize((wxSize(FromDIP(680 / 2), FromDIP(69))));
+    //m_fileListbutton->SetMinSize((wxSize(FromDIP(680 / 2), FromDIP(69))));
     m_fileListbutton->SetFont(Label::sysFont(14, false));
     m_fileListbutton->SetFlashForge(true);
     m_fileListbutton->SetBorderWidth(0);
@@ -2211,7 +2686,7 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
     m_fileListbutton->SetCornerRadius(0);
 
     m_timeLapseVideoBtn = new Button(m_panel_idle_text, _L("Time-Lapse Video"), "time_lapse_video", 0, 16);
-    m_timeLapseVideoBtn->SetMinSize((wxSize(FromDIP(680 / 2), FromDIP(69))));
+    //m_timeLapseVideoBtn->SetMinSize((wxSize(FromDIP(680 / 2), FromDIP(69))));
     m_timeLapseVideoBtn->SetFont(Label::sysFont(14, false));
     m_timeLapseVideoBtn->SetFlashForge(true);
     m_timeLapseVideoBtn->SetBorderWidth(0);
@@ -2221,14 +2696,13 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
     m_timeLapseVideoBtn->SetCornerRadius(0);
 
     wxBoxSizer* bSizer_h_idle_text = new wxBoxSizer(wxHORIZONTAL);
-    bSizer_h_idle_text->Add(m_fileListbutton, 0, wxEXPAND | wxALL, 0);
-    bSizer_h_idle_text->Add(m_timeLapseVideoBtn, 0, wxEXPAND | wxLEFT, FromDIP(5));
+    bSizer_h_idle_text->Add(m_fileListbutton, 1, wxEXPAND | wxALL, 0);
+    bSizer_h_idle_text->Add(m_timeLapseVideoBtn, 1, wxEXPAND | wxLEFT, FromDIP(5));
 
     m_panel_idle_text->SetSizer(bSizer_h_idle_text);
-    bSizer_h_idle_text->Fit(m_panel_idle_text);
     idleSizer->Add(m_panel_idle_text, 0, wxALL | wxEXPAND, 0);
 
-    //*** 文件列表和列表内容间距
+    //*** 文件列表和列表内容间�?
     // 添加空白间距
     m_panel_separotor8 = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
     m_panel_separotor8->SetBackgroundColour(wxColour(240, 240, 240));
@@ -2238,23 +2712,21 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
     m_idleWnd.push_back(m_panel_separotor8);
     // m_panel_separotor8->Hide();
 
-    m_scrolledWindow = new wxScrolledWindow(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHSCROLL | wxVSCROLL);
+    m_scrolledWindow = new wxScrolledWindow(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
     // m_scrolledWindow->SetBackgroundColour(/**wxWHITE*/ wxColour("#fafafa"));
     m_scrolledWindow->SetBackgroundColour(*wxWHITE);
-    m_scrolledWindow->SetMinSize(wxSize(FromDIP(680), FromDIP(198)));
-    m_scrolledWindow->SetMaxSize(wxSize(FromDIP(680), FromDIP(198)));
+    m_scrolledWindow->SetMinSize(wxSize(0, FromDIP(198)));
+    m_scrolledWindow->SetMaxSize(wxSize(-1, FromDIP(198)));
     m_scrolledWindow->SetScrollRate(0, 30);
     m_sizer_my_devices = new wxBoxSizer(wxVERTICAL);
     m_scrolledWindow->SetSizer(m_sizer_my_devices);
     m_scrolledWindow->Layout();
-    m_sizer_my_devices->Fit(m_scrolledWindow);
 
     idleSizer->Add(m_scrolledWindow, 0, wxALL | wxEXPAND, 0);
 
     m_scrolledWindow->Hide();
     // split line
-    wxSize size           = GetSize();
-    m_FileList_split_line = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(size.x, FromDIP(1)), wxTAB_TRAVERSAL);
+    m_FileList_split_line = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(1)), wxTAB_TRAVERSAL);
     m_FileList_split_line->SetBackgroundColour(wxColor("#F0F0F0"));
     idleSizer->Add(m_FileList_split_line, 0, wxALL | wxEXPAND, 0);
     m_FileList_split_line->Hide();
@@ -2319,7 +2791,7 @@ void SingleDeviceState::setupLayoutIdleInfoPage(wxBoxSizer* idleSizer, wxPanel* 
     // 延迟视频
     m_timeLapseVideoPnl = new TimeLapseVideoPanel(parent);
     m_timeLapseVideoPnl->SetBackgroundColour(*wxWHITE);
-    m_timeLapseVideoPnl->SetMinSize(wxSize(FromDIP(680), FromDIP(255)));
+    m_timeLapseVideoPnl->SetMinSize(wxSize(-1, FromDIP(255)));
     m_timeLapseVideoPnl->Hide();
     idleSizer->Add(m_timeLapseVideoPnl, 0, wxALL | wxEXPAND, 0);
 }
@@ -2452,14 +2924,17 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
     m_device_info_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
         // m_device_info_button->SetIcon("device_idle_file_info");
         m_device_info_button->Refresh();
+        {
+            std::ostringstream selection;
+            selection << "device-info-click pid=0x" << std::hex << m_pid << std::dec
+                      << " selected=" << (m_pid == GUIDER_3_ULTRA ? "m_busy_G3U_detail" : "m_busy_device_detial");
+            log_device_detail_layout(selection.str());
+        }
         if (m_pid == 0x001F && m_busy_G3U_detail) {
             if (m_busy_device_detial) {
                 m_busy_device_detial->Hide();
             }
             bool bShow = !m_busy_G3U_detail->IsShown();
-            if (m_monitor_panel) {
-                m_monitor_panel->Show(!bShow);
-            }
             m_busy_G3U_detail->Show(bShow);
             m_busy_G3U_detail->Layout();
             if (bShow) {
@@ -2473,11 +2948,9 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
                     m_busy_G3U_detail->Hide();
                 }
                 bool bShow = !m_busy_device_detial->IsShown();
-                if (m_monitor_panel) {
-                    m_monitor_panel->Show(!bShow);
-                }
                 m_busy_device_detial->Show(bShow);
                 m_busy_device_detial->Layout();
+                log_device_detail_layout(std::string("m_busy_device_detial shown=") + (bShow ? "true" : "false"));
                 if (bShow) {
                     m_device_info_button->SetBackgroundColor(wxColour(217, 234, 255));
                 } else {
@@ -2526,9 +2999,6 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
         } else {
             if (m_busy_circula_filter) {
                 bool bShow = !m_busy_circula_filter->IsShown();
-                if (m_monitor_panel) {
-                    m_monitor_panel->Show(!bShow);
-                }
                 m_busy_circula_filter->Show(bShow);
                 m_busy_circula_filter->Layout();
                 if (bShow) {
@@ -2554,18 +3024,12 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
         Layout();
     });
 
-    m_idle_device_info_button->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-        if (m_busy_device_info) {
-            bool bShow = !m_busy_device_info->IsShown();
-            m_busy_device_info->Show(bShow);
-            m_busy_device_info->Layout();
-            if (bShow) {
-                m_idle_device_info_button->SetBackgroundColor(wxColour(217, 234, 255));
-            }
-            else {
-                m_idle_device_info_button->SetBackgroundColor(wxColour(255, 255, 255));
-            }
-        }
+    m_idle_device_info_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
+        if (!m_busy_device_info) return;
+
+        const bool bShow = !m_busy_device_info->IsShown();
+        // The data is populated by device events before the click. Only switch
+        // mutually exclusive windows here; do not rebuild the whole device page.
         if (m_busy_device_detial) {
             m_busy_device_detial->Hide();
         }
@@ -2578,7 +3042,20 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
         if (m_device_info_button) {
             m_device_info_button->SetBackgroundColor(wxColour(255, 255, 255));
         }
-        Layout();
+
+        m_busy_device_info->Show(bShow);
+        m_idle_device_info_button->SetBackgroundColor(bShow ? wxColour(217, 234, 255) : wxColour(255, 255, 255));
+
+        // Layout only the direct container. Calling SingleDeviceState::Layout()
+        // here also lays out the camera and every other section, which made this
+        // already-populated panel appear unnecessarily late.
+        if (wxSizer *sizer = m_busy_device_info->GetContainingSizer()) {
+            sizer->Layout();
+        }
+        if (wxWindow *container = m_busy_device_info->GetParent()) {
+            container->Refresh(false);
+            container->Update();
+        }
     });
 
     // 添加设备详情
@@ -2588,7 +3065,7 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
         event.Skip();
         m_busy_device_detial->switchPage();
     });
-    busySizer->Add(m_busy_device_detial, 0, wxALL, 0);
+    busySizer->Add(m_busy_device_detial, 0, wxALL | wxEXPAND, 0);
     m_busy_device_detial->Hide();
 
     m_busy_G3U_detail = new G3UDetail(parent);
@@ -2597,7 +3074,7 @@ void SingleDeviceState::setupLayoutBusyCtrlPage(wxBoxSizer* busySizer, wxPanel* 
         event.Skip();
         m_busy_G3U_detail->switchPage();
     });
-    busySizer->Add(m_busy_G3U_detail, 0, wxALL, 0);
+    busySizer->Add(m_busy_G3U_detail, 0, wxALL | wxEXPAND, 0);
     m_busy_G3U_detail->Hide();
 
     // 添加循环过滤
@@ -2632,15 +3109,6 @@ void SingleDeviceState::setupLayoutIdleCtrlPage(wxBoxSizer* idleSizer, wxPanel* 
 {
     // 新增温度-设备控件
     m_idle_tempMixDevice = new TempMixDevice(parent, false);
-    m_idle_tempMixDevice->Bind(EVT_HIDE_PANEL, [=](wxCommandEvent& event) { 
-        bool x = event.GetInt() == 0;
-        if (m_monitor_panel) {
-            this->Freeze();
-            m_monitor_panel->Show(x);
-            this->Layout();
-            this->Thaw();
-        }
-    });
     idleSizer->Add(m_idle_tempMixDevice, 0, wxALL | wxEXPAND, 0);
 }
 
@@ -2660,12 +3128,18 @@ void SingleDeviceState::connectEvent()
    MultiComMgr::inst()->Bind(COM_CONNECTION_READY_EVENT, &SingleDeviceState::onComConnectReady, this);
    //连接断开
    MultiComMgr::inst()->Bind(COM_CONNECTION_EXIT_EVENT, &SingleDeviceState::onConnectExit, this);
+   //账号登录/登出维护（登出时关闭视频弹窗�?
+   MultiComMgr::inst()->Bind(COM_WAN_DEV_MAINTAIN_EVENT, &SingleDeviceState::onComWanDevMaintain, this);
    //get file list info
    MultiComMgr::inst()->Bind(COM_GET_DEV_GCODE_LIST_EVENT, &SingleDeviceState::onFileListUpdate, this);
    //file list file send finished
    MultiComMgr::inst()->Bind(COM_START_JOB_EVENT, &SingleDeviceState::onFileSendFinished, this);
    //lan network download file finished
    MultiComMgr::inst()->Bind(COM_GET_GCODE_THUMB_EVENT, &SingleDeviceState::onLanThumbDownloadFinished, this);
+   //云切片状态更�?
+   MultiComMgr::inst()->Bind(COM_CONN_CLOUD_SLICE_EVENT, &SingleDeviceState::onComCloudSliceUpdate, this);
+   //云任务状态更�?
+   MultiComMgr::inst()->Bind(COM_CONN_JOB_INFO_EVENT, &SingleDeviceState::onComJobInfoUpdate, this);
 
    //local file list
    m_fileListbutton->Bind(wxEVT_LEFT_DOWN, &SingleDeviceState::onFileListClicked, this);
@@ -2682,7 +3156,7 @@ void SingleDeviceState::connectEvent()
    //        m_lamp_control_button->Refresh();
    //        m_lamp_control_button->SetFlashForgeSelected(false);
    //    } else {
-   //        //开灯
+   //        //开�?
    //        ComLightCtrl *lightctrl = new ComLightCtrl(OPEN);
    //        Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, lightctrl);
    //        m_lamp_control_button->SetIcon("device_lamp_control_press");
@@ -2698,14 +3172,53 @@ void SingleDeviceState::connectEvent()
    m_download_tool.Bind(EVT_FF_DOWNLOAD_FINISHED, &SingleDeviceState::onDownloadImageFinished, this);
 }
 
+
+void SingleDeviceState::UpdateScrollVirtualSize()
+{
+    wxSizer* sizer = GetSizer();
+    if (!sizer)
+        return;
+
+    //设置摄像头缩放大�?
+    // Camera height is owned by FFRTMPVideoCtrl::OnSize() (4:3 video plus the
+    // status bar). Changing it here to width * 0.75 removes the status-bar
+    // height, after which OnSize restores it and causes a layout oscillation.
+
+    // 获取内容需要的最小尺寸（核心：取sizer计算出的最小尺寸）
+    wxSize minContentSize = sizer->CalcMin();
+    // 获取滚动窗口当前可视区域大小
+    wxSize clientSize = GetClientSize();
+
+    // This page is horizontally responsive and only scrolls vertically.
+    // Printing controls can slightly increase CalcMin() (often by the
+    // scrollbar gutter width), but that must not widen the virtual canvas.
+    int virtW = clientSize.x;
+    int virtH = wxMax(minContentSize.y, clientSize.y);
+
+    // 设置滚动窗口虚拟画布大小
+    SetVirtualSize(virtW, virtH);
+}
+
+void SingleDeviceState::OnScrollWinSize(wxSizeEvent& evt)
+{
+    UpdateScrollVirtualSize();
+    evt.Skip();
+}
+
 void SingleDeviceState::onConnectWanDevInfoUpdate(ComWanDevInfoUpdateEvent &event) 
 {
     event.Skip();
+    // 摄像头绑定设备的拉流地址更新（可能与当前选中设备不同）�?
+    // 注意：这里只在有新地址时切流，绝不因设�?MQTT)离线断开摄像头（视频流走独立服务器）�?
+    if (event.id == m_camera_cur_id) {
+        refreshCameraStream();
+    }
     if (m_cur_id == event.id) {
-        //当前选中的设备，获取相应数据，更新界面显示
+        //当前选中的设备，获取相应数据，更新界面显�?
         const com_dev_data_t &data = MultiComMgr::inst()->devData(event.id);
         // 离线判断
-        std::string status = data.wanDevInfo.status;
+        std::string status = wan_device_display_status(data);
+        camdbg_log("onConnectWanDevInfoUpdate wanStatus=" + status);
         if (status.compare("offline") == 0) {
             setPageOffline();
         } else {
@@ -2716,7 +3229,7 @@ void SingleDeviceState::onConnectWanDevInfoUpdate(ComWanDevInfoUpdateEvent &even
     
     if (-1 == m_cur_id) {
         const com_dev_data_t &data = MultiComMgr::inst()->devData(event.id);
-        if (data.wanDevInfo.serialNumber.compare(m_cur_serial_number) == 0 && data.wanDevInfo.status.compare("offline") != 0) {
+        if (data.wanDevInfo.serialNumber.compare(m_cur_serial_number) == 0 && is_wan_device_online(data)) {
             m_cur_id = event.id;
             setCurId(m_cur_id);
         }
@@ -2728,16 +3241,45 @@ void SingleDeviceState::onComDevDetailUpdate(ComDevDetailUpdateEvent &event)
 {
     event.Skip();
     if (m_cur_id == event.id) {
-        // 当前选中的设备，获取相应数据，更新界面显示
+        // 当前选中的设备，获取相应数据，更新界面显�?
         bool  valid = false;
         const com_dev_data_t& data  = MultiComMgr::inst()->devData(m_cur_id, &valid);
         fillValue(data);
+    }
+    // 摄像头绑定设备的视频流刷新（绑定设备可能与当前选中设备不同）�?
+    if (event.id == m_camera_cur_id) {
+        refreshCameraStream();
+    }
+}
+
+void SingleDeviceState::onComCloudSliceUpdate(ComCloudSliceUpdateEvent& event)
+{
+    event.Skip();
+    if (m_cur_id == event.id) {
+        fillCloudValue(*event.state);
+    }
+}
+
+void SingleDeviceState::onComJobInfoUpdate(ComJobInfoUpdateEvent& event)
+{
+    event.Skip();
+    if (m_cur_id == event.id) {
+        fillJobValue(*event.info);
     }
 }
 
 void SingleDeviceState::onComConnectReady(ComConnectionReadyEvent &event) 
 {
     event.Skip();
+    // MultiComMgr has stored devDetail before broadcasting this event. Refresh
+    // the selected device immediately instead of waiting for another update.
+    if (m_cur_id == event.id) {
+        bool valid = false;
+        const com_dev_data_t &data = MultiComMgr::inst()->devData(event.id, &valid);
+        if (valid && data.devDetail) {
+            updateDeviceInfoPanel(data);
+        }
+    }
     if (-1 == m_cur_id) {
         const com_dev_data_t &data  = MultiComMgr::inst()->devData(event.id);
         std::string           lan_serial_number = data.lanDevInfo.serialNumber;
@@ -2749,15 +3291,123 @@ void SingleDeviceState::onComConnectReady(ComConnectionReadyEvent &event)
     }
 }
 
-void SingleDeviceState::onConnectExit(ComConnectionExitEvent &event) 
-{ 
-    event.Skip(); 
+// void SingleDeviceState::onConnectExit(ComConnectionExitEvent &event)
+// {
+//     event.Skip();
+//     unbind_ts("A. onConnectExit ENTER id=" + std::to_string(event.id)
+//               + " cur_id=" + std::to_string(m_cur_id)
+//               + " cam_id=" + std::to_string(m_camera_cur_id));
+//     if (event.id == m_cur_id) {
+//         unbind_ts("B1. setPageOffline BEGIN (整页离线重建)");
+//         setPageOffline();
+//         unbind_ts("B2. setPageOffline END");
+//     }
+//     // 摄像头“绑定设备”的连接彻底退出（解绑/移除/连接丢失，设备已�?MultiComMgr 移除）→
+//     // 该设备已不存在，视频不可能再继续：先关闭视频播放窗口、停止视频流，再解绑摄像头�?
+//     // 注意：这�?MQTT 上报的临�?offline 不同——后者连接仍在、流可能正常，不在此断开
+//     // （沿用既有“设备离线与摄像头解耦”）；此处是连接真正消失，必须收起视频�?
+//     if (event.id == m_camera_cur_id) {
+//         // 先同步解绑，避免后续事件再次进入本分支�?
+//         m_camera_cur_id = -1;
+//         m_camera_stream_url.clear();
+//         // 分两步、分不同 tick 执行，优先保证产品体验：
+//         //   tick1：关闭视频弹�?+ 画面切到“断开连接”并隐藏 —�?�?UI、非阻塞�?
+//         //          让用户立刻看到“设备已解绑、摄像头画面已隐藏”�?
+//         //   tick2：真正回收解码线程（可能�?DNS/连接/关闭阻塞）—�?放到视觉反馈之后�?
+//         //          即便回收有瞬时卡顿，也不影响解绑画面的即时呈现�?
+//         // （另外，解绑正在播放的设备时本事件往往还会触发 setPageOffline 整页重建�?
+//         //   把摄像头拆除分到后续 tick 也能避免与其叠加成一次长卡顿。）
+//         unbind_ts("C. onConnectExit 调度 camera tick1 (CallAfter)");
+//         CallAfter([this]() {
+//             if (!m_camera_panel) return;
+//             unbind_ts("D. camera tick1 ENTER");
+//             m_camera_panel->closePopup();            // 关闭视频播放窗口（若打开�?
+//             unbind_ts("E. closePopup END");
+//             m_camera_panel->showOfflineImmediate();  // 立即隐藏画面 + “断开连接”占位（非阻塞）
+//             unbind_ts("F. showOfflineImmediate END (画面已隐�? 用户此刻应看到解�?");
+//             CallAfter([this]() {
+//                 if (!m_camera_panel) return;
+//                 unbind_ts("H. camera tick2 ENTER -> reapStoppedStream BEGIN");
+//                 m_camera_panel->reapStoppedStream();  // 后台回收解码线程
+//                 unbind_ts("I. reapStoppedStream END");
+//             });
+//             unbind_ts("G. camera tick1 EXIT (已调�?tick2)");
+//         });
+//     }
+// }
+
+void SingleDeviceState::onConnectExit(ComConnectionExitEvent &event)
+{
+    event.Skip();
+
+    if (m_camera_panel) m_camera_panel->logPanelState("SingleDeviceState::onConnectExit enter");
+
     if (event.id == m_cur_id) {
-        setPageOffline();
+        setPageOffline();   // 页面拆除(不含摄像�?二者解�?
+        setDevicePageState(DevicePageState::NoDevice);
+    }
+
+    // 连接彻底退�?设备已从 MultiComMgr 移除,流不可能再继�?必须显式收起视频�?
+    // (这与 MQTT 临时 offline 不同——那种情况连接还在、由流健康度自行决定,故不在此断�?
+    if (event.id == m_camera_cur_id) {
+        m_camera_cur_id = -1;        // 先同步解�?防止后续事件重入本分�?
+        m_camera_stream_url.clear();
+
+        CallAfter([this]() {          // 延后一 tick,避免与整页重建叠加成长卡�?
+            if (!m_camera_panel) return;
+            m_camera_panel->logPanelState("onConnectExit CallAfter before camera offline");
+            // Device unbind/removal has a dedicated path: invalidate the old
+            // URL/comId and keep the current camera surface visible offline.
+            m_camera_panel->handleDeviceUnbound();
+            m_camera_panel->logPanelState("onConnectExit CallAfter after camera disconnected");
+            CallAfter([this]() {
+                if (!m_camera_panel) return;
+                m_camera_panel->reapStoppedStream();  // 回收解码线程
+            });
+        });
     }
 }
 
-void SingleDeviceState::onTargetTempModify(wxCommandEvent &event) 
+void SingleDeviceState::onComWanDevMaintain(ComWanDevMaintainEvent &event)
+{
+    event.Skip();
+    if (event.sessionGeneration != 0
+        && event.sessionGeneration != MultiComMgr::inst()->wanSessionGeneration()) {
+        return;
+    }
+    if (m_camera_panel) m_camera_panel->logPanelState("onComWanDevMaintain enter");
+    if (event.serviceState == WanServiceState::Reconnecting) {
+        camdbg_log("WAN service reconnecting; keep device page and last device state");
+        return;
+    }
+    if (event.serviceState == WanServiceState::ApiUnavailable) {
+        camdbg_log("WAN API unavailable; keep device page and distinguish from printer offline");
+        return;
+    }
+    // 账号登出（login=false）：�?WAN)设备全部被移除�?
+    if (!event.login) {
+        // 刷新并清空设备页到离线态：仅当当前页展示的正是云设备（或该设备已被移除）时才清页；
+        // 本地(LAN)设备不受账号登出影响，保持原样不动�?
+        bool valid = false;
+        const com_dev_data_t &data = MultiComMgr::inst()->devData(m_cur_id, &valid);
+        if (!valid || data.connectMode == COM_CONNECT_WAN) {
+            setPageOffline();   // 整页离线重建（清空并刷新一次）；摄像头窗口与此解耦、不受影�?
+            setDevicePageState(DevicePageState::NoDevice);
+        }
+        // 摄像头：停流并解绑，但保留内联窗口，退回“缺省图 + 不可播放按钮”的初始不可用状态�?
+        if (m_camera_panel) {
+            // 登出后保留摄像头布局区域，并显示缺省图。该标志也会阻止并发�?
+            // onConnectExit 延迟回调再次隐藏窗口�?
+            m_camera_panel->setOffline(true);
+            m_camera_panel->logPanelState("onComWanDevMaintain after setOffline(true)");
+            // m_camera_panel->closePopup();
+            m_camera_cur_id = -1;
+            m_camera_stream_url.clear();
+        }
+    }
+}
+
+void SingleDeviceState::onTargetTempModify(wxCommandEvent &event)
 {
     /*event.Skip();
     wxTextCtrl *click_btn = dynamic_cast<wxTextCtrl *>(event.GetEventObject());
@@ -2770,9 +3420,6 @@ void SingleDeviceState::onTargetTempModify(wxCommandEvent &event)
             }
             if (m_busy_device_detial) {
                 m_busy_device_detial->Hide();
-            }
-            if (m_monitor_panel) {
-                m_monitor_panel->Show();
             }
             if (m_filter_button) {
                 m_filter_button->SetBackgroundColor(wxColour(255, 255, 255));
@@ -2826,244 +3473,318 @@ void SingleDeviceState::onModifyTempClicked(wxCommandEvent &event)
     Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, tempCtrl);*/
 }
 
-void SingleDeviceState::onDevStateChanged(std::string devState, const com_dev_data_t &data)
+void SingleDeviceState::onDevStateChanged(std::string devState, const com_dev_data_t& data)
 {
-    std::string state = devState; // 状态
+    std::string state = devState; // 状�?
+    //state             = P_CLOUD_SLICING;
     if (data.devDetail->pid == 0x001F) {
         setG3UProductAuthority(*data.devProduct);
     } else {
         setDevProductAuthority(*data.devProduct);
     }
-    
-    //if (m_cur_dev_state != state) {
-        m_cur_dev_state = state;
 
-        double total_weight = data.devDetail->estimatedRightWeight; //材料重量
-        char   weight[64];
-        ::sprintf(weight, "  %.2f g", total_weight);
-        m_material_weight_label->SetLabel(weight);
-        if (state == P_READY) {
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_tempCtrl_panel->SwitchTargetTemp(false);
-            m_machine_idle_panel->Show();
-            m_machine_idle_info_panel->Show();
-            m_machine_ctrl_info_panel->Hide();
-            m_machine_ctrl_panel->Hide();
-            m_busyState_top_gap->Hide();
-            m_busyState_bottom_gap->Hide();
-            m_offline_info_page_gap->Hide();
-            m_panel_idle_text->Show();
-            m_panel_separotor8->Show();
-            wxString idle_state = _L("idle");
-            setTipMessage(idle_state, "#00CD6D", "", false);
-            std::string lightStatus = data.devDetail->lightStatus;            
-            m_idle_tempMixDevice->setState(1, lightStatus.compare(CLOSE));
+    // 设备遥测每帧都会走到这里，仅当状态真正变化时才需要重排整页布局�?
+    // 否则每帧一�?SingleDeviceState::Layout() 会与摄像头持续重绘叠加，
+    // 导致喷头面板等控件“时隐时现”。这里记录状态是否变化，末尾据此决定是否 Layout()�?
+    // 说明：分支内�?Show()/Hide() 对已处于目标状态的窗口是幂等空操作，不会触发重绘，
+    // 因此保留每帧执行不影响性能；连续数值（温度/进度/灯状态等）仍需每帧更新�?
+    bool devStateChanged = (m_cur_dev_state != state);
+    m_cur_dev_state = state;
+    //m_panel_control_print->Show();
+    //m_panel_control_cloud->Hide();
+    //m_staticText_cloud_text->Hide();
+    //m_staticText_cloud_queue_count->Hide();
+    //m_staticText_cloud_queue_text->Hide();
+    //m_staticText_cloud_queue_tip->Hide();
+    if (state == P_READY) {
+        
+    } else if (state == P_CLOUD_SLICING || state == P_DOWNLOADING || state == P_UNZIPPING || state == P_SENDING) {
+        m_print_button->Hide();
+        m_cancel_button->Hide();
+        m_staticText_time_label->Hide();
+        m_staticText_count_time->Hide();
+        m_panel_control_print->Hide();
+        if (state == P_CLOUD_SLICING) {
+            m_panel_control_cloud->Show();
+        } else {
+            m_panel_control_cloud->Hide();
+        }
+        if (state == P_SENDING) {
+            m_staticText_cloud_text->SetForegroundColour(wxColour(50, 141, 251));
+            m_staticText_cloud_text->SetLabel(_L("Sending task..."));
+            m_staticText_cloud_text->Show();
+            m_progress_bar->Hide();
+        }
+    } else {
+        m_isCloudState = false;
+        m_print_button->Show();
+        m_cancel_button->Show();
+        m_staticText_time_label->Show();
+        m_staticText_count_time->Show();
+        m_panel_control_print->Show();
+        m_panel_control_cloud->Hide();
+        m_staticText_cloud_queue_count->Hide();
+        m_staticText_cloud_queue_text->Hide();
+        m_staticText_cloud_queue_tip->Hide();
+        m_staticText_cloud_text->Hide();
+    }
 
-            m_cur_print_file_name.clear();
-            m_staticText_idle->SetLabel(_L(HAS_NO_PRINTING));
-			m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
-            m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-            m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-            reInitMaterialPic();
-        } else if (state == P_COMPLETED || state == CANCEL) {
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_tempCtrl_panel->SwitchTargetTemp(true);
-            if (m_machine_idle_panel->IsShown()) {
-                showMaterialStation(true);
-                m_scrolledWindow->Hide();
-                m_FileList_split_line->Hide();
-                m_panel_print_btn->Hide();
-                m_timeLapseVideoPnl->Hide();
-                m_panel_idle_text->Hide();
-            }
-            m_machine_ctrl_panel->Show();
-            m_machine_ctrl_info_panel->Show();
-            m_machine_idle_panel->Hide();
-            m_machine_idle_info_panel->Hide();
-            m_print_button->SetTextColor(wxColor("#999999"));
-            m_cancel_button->SetTextColor(wxColor("#999999"));
-            m_print_button->Enable(false);
-            m_cancel_button->Enable(false);
-            m_print_button->SetIcon("device_pause_print_disable");
-            m_cancel_button->SetIcon("device_cancel_print_disable");
-            wxString compelete_state = _L("completed");
-            wxString compelete_info  = _L("Print completed,clean platform!");
-            setTipMessage(compelete_state, "#328DFB", compelete_info, true, true);
+    if (state == P_READY) {
+        if (m_isCloudState) {
+            Layout();
+            return;
+        }
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(false);
+        m_machine_idle_panel->Show();
+        m_machine_idle_info_panel->Show();
+        m_machine_ctrl_info_panel->Hide();
+        m_machine_ctrl_panel->Hide();
+        m_busyState_top_gap->Hide();
+        m_busyState_bottom_gap->Hide();
+        m_offline_info_page_gap->Hide();
+        m_panel_idle_text->Show();
+        m_panel_separotor8->Show();
+        m_nozzles->SetCurState(true);
+        wxString idle_state = _L("idle");
+        setTipMessage(idle_state, "#00CD6D", "", false);
+        std::string lightStatus = data.devDetail->lightStatus;
+        m_idle_tempMixDevice->setState(1, lightStatus.compare(CLOSE));
 
-            m_staticText_time_label->SetLabel(_L("Total Time"));
-
-            double totalTime = data.devDetail->printDuration; // 本次打印耗时
-            m_staticText_count_time->SetLabel(convertSecondsToHMS(totalTime));
-        } else if (state == P_BUSY) {
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_panel_print_btn->Hide();
+        m_cur_print_file_name.clear();
+        setIdlePrinterText();
+        m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
+        m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+        m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+        reInitMaterialPic();
+    } else if (state == P_COMPLETED || state == CANCEL) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        if (m_machine_idle_panel->IsShown()) {
+            //showMaterialStation(true);
             m_scrolledWindow->Hide();
             m_FileList_split_line->Hide();
+            m_panel_print_btn->Hide();
             m_timeLapseVideoPnl->Hide();
-            m_idle_tempMixDevice->Show();
-            m_tempCtrl_panel->SwitchTargetTemp(true);
-            m_machine_idle_panel->Show();
-            m_machine_idle_info_panel->Show();
-            m_machine_ctrl_info_panel->Hide();
-            m_machine_ctrl_panel->Hide();
             m_panel_idle_text->Hide();
-            m_panel_separotor8->Hide();
-            m_busyState_top_gap->Show();
-            m_busyState_bottom_gap->Show();
-            m_offline_info_page_gap->Hide();
-            wxString busy_state = _L("busy");
-            wxString busy_info = _L("Print cancelled,in cache command");
-            setTipMessage(busy_state, "#F9B61C", busy_info, false, false);
-            std::string lightStatus = data.devDetail->lightStatus;   
-            m_idle_tempMixDevice->setState(1, lightStatus.compare(CLOSE));
-
-            //splitIdleTextLabel();
-            m_staticText_idle->SetLabel(_L(HAS_NO_PRINTING));
-            m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
-            m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-            m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-        } else if (state == P_CALIBRATE) {
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_tempCtrl_panel->SwitchTargetTemp(true);
-            m_machine_idle_panel->Show();
-            m_machine_idle_info_panel->Show();
-            m_machine_ctrl_info_panel->Hide();
-            m_machine_ctrl_panel->Hide();
-            wxString busy_state = _L("busy");
-            wxString busy_info = _L("");
-            setTipMessage(busy_state, "#F9B61C", busy_info, false, false);
-            std::string lightStatus = data.devDetail->lightStatus;   
-            m_idle_tempMixDevice->setState(1, lightStatus.compare(CLOSE));
-            //splitIdleTextLabel();
-            m_staticText_idle->SetLabel(_L(HAS_NO_PRINTING));
-            m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
-            m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-            m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-         } else if (state == P_ERROR) {
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_tempCtrl_panel->SwitchTargetTemp(true);
-            m_machine_idle_panel->Show();
-            m_machine_idle_info_panel->Show();
-            m_machine_ctrl_info_panel->Hide();
-            m_machine_ctrl_panel->Hide();
-            m_panel_separotor8->Hide();
-            m_busyState_top_gap->Show();
-            m_busyState_bottom_gap->Show();
-            m_offline_info_page_gap->Hide();
-            m_panel_idle_text->Hide();
-            wxString error_state = _L("error");
-            std::string error_info  = data.devDetail->errorCode;
-            wxString trans_error = FFUtils::converDeviceError(error_info);
-            setTipMessage(error_state, "#FB4747", trans_error, !trans_error.empty(), false);
-            m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
-            std::string lightStatus = data.devDetail->lightStatus;  
-            m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-            m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
-        } else if (state == PAUSE) {
-             m_staticText_device_info->Hide();
-             m_clear_button->Hide();
-             m_tempCtrl_panel->SwitchTargetTemp(true);
-            if (m_machine_idle_panel->IsShown()) {
-                showMaterialStation(true);
-                m_scrolledWindow->Hide();
-                m_FileList_split_line->Hide();
-                m_panel_print_btn->Hide();
-                m_timeLapseVideoPnl->Hide();
-                m_panel_idle_text->Hide();
-            }
-            m_machine_ctrl_panel->Show();
-            m_machine_ctrl_info_panel->Show();
-            m_machine_idle_panel->Hide();
-            m_machine_idle_info_panel->Hide();
-            wxString print_state = _L("pause");
-            setTipMessage(print_state, "#982187");
-
-            m_print_button->Enable(true);
-            m_cancel_button->Enable(true);
-            m_print_button->SetIcon("device_pause_print");
-            m_cancel_button->SetIcon("device_cancel_print");
-            m_print_button->SetTextColor(wxColour(51, 51, 51));
-            m_cancel_button->SetTextColor(wxColour(51, 51, 51));
-            m_print_button->SetLabel(_L("continue print"));
-            m_print_button->SetIcon("device_continue_print");
-            m_print_button->Refresh();
-
-            m_staticText_time_label->SetLabel(_L("Remaining Time"));
-            double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
-            m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
-        } else if (state == P_PAUSING || state == P_HEATING) {
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_tempCtrl_panel->SwitchTargetTemp(true);
-            if (m_machine_idle_panel->IsShown()) {
-                showMaterialStation(true);
-                m_scrolledWindow->Hide();
-                m_panel_print_btn->Hide();
-                m_FileList_split_line->Hide();
-                m_timeLapseVideoPnl->Hide();
-                m_panel_idle_text->Hide();
-            }
-            m_machine_ctrl_panel->Show();
-            m_machine_ctrl_info_panel->Show();
-            m_machine_idle_panel->Hide();
-            m_machine_idle_info_panel->Hide();
-            wxString print_state = _L("pausing");
-            if (state == P_HEATING) {
-                print_state = _L("heating");
-            }
-            setTipMessage(print_state, "#982187");
-            m_print_button->SetTextColor(wxColor("#999999"));
-            m_cancel_button->SetTextColor(wxColor("#999999"));
-            m_print_button->Enable(false);
-            m_cancel_button->Enable(false);
-            m_print_button->SetIcon("device_pause_print_disable");
-            m_cancel_button->SetIcon("device_cancel_print_disable");
-            m_print_button->SetLabel(_L("continue print"));
-            m_print_button->SetIcon("device_continue_print");
-            m_print_button->Refresh();
-
-            m_staticText_time_label->SetLabel(_L("Remaining Time"));
-            double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
-            m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
-        }else{
-            m_staticText_device_info->Hide();
-            m_clear_button->Hide();
-            m_tempCtrl_panel->SwitchTargetTemp(true);
-            if (m_machine_idle_panel->IsShown()) {
-                showMaterialStation(true);
-                m_scrolledWindow->Hide();
-                m_panel_print_btn->Hide();
-                m_FileList_split_line->Hide();
-                m_timeLapseVideoPnl->Hide();
-                m_panel_idle_text->Hide();
-            }
-            m_machine_ctrl_panel->Show();
-            m_machine_ctrl_info_panel->Show();
-            m_machine_idle_panel->Hide();
-            m_machine_idle_info_panel->Hide();
-            wxString print_state = _L("printing");
-            setTipMessage(print_state, "#4D54FF");
-
-            m_print_button->Enable(true);
-            m_cancel_button->Enable(true);
-            m_print_button->SetIcon("device_pause_print");
-            m_cancel_button->SetIcon("device_cancel_print");
-            m_print_button->SetTextColor(wxColour(51, 51, 51));
-            m_cancel_button->SetTextColor(wxColour(51, 51, 51));
-            m_print_button->SetLabel(_L("pause print"));
-            m_print_button->SetIcon("device_pause_print");
-            m_print_button->Refresh();
-            m_staticText_time_label->SetLabel(_L("Remaining Time"));
-            double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
-            m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
         }
+        m_machine_ctrl_panel->Show();
+        m_machine_ctrl_info_panel->Show();
+        m_machine_idle_panel->Hide();
+        m_machine_idle_info_panel->Hide();
+        m_print_button->SetTextColor(wxColor("#999999"));
+        m_cancel_button->SetTextColor(wxColor("#999999"));
+        m_print_button->Enable(false);
+        m_cancel_button->Enable(false);
+        m_print_button->SetIcon("device_pause_print_disable");
+        m_cancel_button->SetIcon("device_cancel_print_disable");
+        m_nozzles->SetCurState(false);
+        wxString compelete_state = _L("completed");
+        wxString compelete_info  = _L("Print completed,clean platform!");
+        setTipMessage(compelete_state, "#328DFB", compelete_info, true, true);
+
+        m_staticText_time_label->SetLabel(_L("Total Time"));
+
+        double totalTime = data.devDetail->printDuration; // 本次打印耗时
+        m_staticText_count_time->SetLabel(convertSecondsToHMS(totalTime));
+    } else if (state == P_BUSY) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_panel_print_btn->Hide();
+        m_scrolledWindow->Hide();
+        m_FileList_split_line->Hide();
+        m_timeLapseVideoPnl->Hide();
+        m_idle_tempMixDevice->Show();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        m_machine_idle_panel->Show();
+        m_machine_idle_info_panel->Show();
+        m_machine_ctrl_info_panel->Hide();
+        m_machine_ctrl_panel->Hide();
+        m_panel_idle_text->Hide();
+        m_panel_separotor8->Hide();
+        m_busyState_top_gap->Show();
+        m_busyState_bottom_gap->Show();
+        m_offline_info_page_gap->Hide();
+        m_nozzles->SetCurState(false);
+        wxString busy_state = _L("busy");
+        wxString busy_info  = _L("Print cancelled,in cache command");
+        setTipMessage(busy_state, "#F9B61C", busy_info, false, false);
+        std::string lightStatus = data.devDetail->lightStatus;
+        m_idle_tempMixDevice->setState(1, lightStatus.compare(CLOSE));
+
+        // splitIdleTextLabel();
+        setIdlePrinterText();
+        m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
+        m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+        m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+    } else if (state == P_CALIBRATE || state == P_LOADING) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        m_machine_idle_panel->Show();
+        m_machine_idle_info_panel->Show();
+        m_machine_ctrl_info_panel->Hide();
+        m_machine_ctrl_panel->Hide();
+        m_nozzles->SetCurState(false);
+        wxString busy_state = _L("busy");
+        wxString busy_info  = _L("");
+        setTipMessage(busy_state, "#F9B61C", busy_info, false, false);
+        std::string lightStatus = data.devDetail->lightStatus;
+        m_idle_tempMixDevice->setState(1, lightStatus.compare(CLOSE));
+        // splitIdleTextLabel();
+        setIdlePrinterText();
+        m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
+        m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+        m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+    } else if (state == P_ERROR) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        m_machine_idle_panel->Show();
+        m_machine_idle_info_panel->Show();
+        m_machine_ctrl_info_panel->Hide();
+        m_machine_ctrl_panel->Hide();
+        m_panel_separotor8->Hide();
+        m_busyState_top_gap->Show();
+        m_busyState_bottom_gap->Show();
+        m_offline_info_page_gap->Hide();
+        m_panel_idle_text->Hide();
+        m_nozzles->SetCurState(false);
+        wxString    error_state = _L("error");
+        std::string error_info  = data.devDetail->errorCode;
+        wxString    trans_error = FFUtils::converDeviceError(error_info);
+        setTipMessage(error_state, "#FB4747", trans_error, !trans_error.empty(), false);
+        m_idle_tempMixDevice->setDevProductAuthority(*data.devProduct);
+        std::string lightStatus = data.devDetail->lightStatus;
+        m_idle_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+        m_busy_lamp_bar->SetLampState(data.devProduct->lightCtrlState == 0, lightStatus.compare(CLOSE));
+    } else if (state == PAUSE) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        if (m_machine_idle_panel->IsShown()) {
+            //showMaterialStation(true);
+            m_scrolledWindow->Hide();
+            m_FileList_split_line->Hide();
+            m_panel_print_btn->Hide();
+            m_timeLapseVideoPnl->Hide();
+            m_panel_idle_text->Hide();
+        }
+        m_machine_ctrl_panel->Show();
+        m_machine_ctrl_info_panel->Show();
+        m_machine_idle_panel->Hide();
+        m_machine_idle_info_panel->Hide();
+        m_nozzles->SetCurState(false);
+        wxString print_state = _L("pause");
+        setTipMessage(print_state, "#982187");
+
+        m_print_button->Enable(true);
+        m_cancel_button->Enable(true);
+        m_print_button->SetIcon("device_pause_print");
+        m_cancel_button->SetIcon("device_cancel_print");
+        m_print_button->SetTextColor(wxColour(51, 51, 51));
+        m_cancel_button->SetTextColor(wxColour(51, 51, 51));
+        m_print_button->SetLabel(_L("continue print"));
+        m_print_button->SetIcon("device_continue_print");
+        m_print_button->Refresh();
+
+        m_staticText_time_label->SetLabel(_L("Remaining Time"));
+        double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
+        m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
+    } else if (state == P_PAUSING || state == P_HEATING) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        if (m_machine_idle_panel->IsShown()) {
+            //showMaterialStation(true);
+            m_scrolledWindow->Hide();
+            m_panel_print_btn->Hide();
+            m_FileList_split_line->Hide();
+            m_timeLapseVideoPnl->Hide();
+            m_panel_idle_text->Hide();
+        }
+        m_machine_ctrl_panel->Show();
+        m_machine_ctrl_info_panel->Show();
+        m_machine_idle_panel->Hide();
+        m_machine_idle_info_panel->Hide();
+        m_nozzles->SetCurState(false);
+        wxString print_state = _L("pausing");
+        if (state == P_HEATING) {
+            print_state = _L("heating");
+        }
+        setTipMessage(print_state, "#982187");
+        m_print_button->SetTextColor(wxColor("#999999"));
+        m_cancel_button->SetTextColor(wxColor("#999999"));
+        m_print_button->Enable(false);
+        m_cancel_button->Enable(false);
+        m_print_button->SetIcon("device_pause_print_disable");
+        m_cancel_button->SetIcon("device_cancel_print_disable");
+        m_print_button->SetLabel(_L("continue print"));
+        m_print_button->SetIcon("device_continue_print");
+        m_print_button->Refresh();
+
+        m_staticText_time_label->SetLabel(_L("Remaining Time"));
+        double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
+        m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
+    } else if (state == P_CLOUD_SLICING || state == P_DOWNLOADING || state == P_UNZIPPING || state == P_SENDING) {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(false);
+        if (m_machine_idle_panel->IsShown()) {
+            //showMaterialStation(true);
+            m_scrolledWindow->Hide();
+            m_FileList_split_line->Hide();
+            m_panel_print_btn->Hide();
+            m_timeLapseVideoPnl->Hide();
+            m_panel_idle_text->Hide();
+        }
+        m_machine_ctrl_panel->Show();
+        m_machine_ctrl_info_panel->Show();
+        m_machine_idle_panel->Hide();
+        m_machine_idle_info_panel->Hide();
+        m_nozzles->SetCurState(false);
+        wxString print_state = _L("busy");
+        setTipMessage(print_state, "#F9B61C");
+    } else {
+        m_staticText_device_info->Hide();
+        m_clear_button->Hide();
+        m_tempCtrl_panel->SwitchTargetTemp(true);
+        if (m_machine_idle_panel->IsShown()) {
+            //showMaterialStation(true);
+            m_scrolledWindow->Hide();
+            m_panel_print_btn->Hide();
+            m_FileList_split_line->Hide();
+            m_timeLapseVideoPnl->Hide();
+            m_panel_idle_text->Hide();
+        }
+        m_machine_ctrl_panel->Show();
+        m_machine_ctrl_info_panel->Show();
+        m_machine_idle_panel->Hide();
+        m_machine_idle_info_panel->Hide();
+        m_nozzles->SetCurState(false);
+        wxString print_state = _L("printing");
+        setTipMessage(print_state, "#4D54FF");
+
+        m_print_button->Enable(true);
+        m_cancel_button->Enable(true);
+        m_print_button->SetIcon("device_pause_print");
+        m_cancel_button->SetIcon("device_cancel_print");
+        m_print_button->SetTextColor(wxColour(51, 51, 51));
+        m_cancel_button->SetTextColor(wxColour(51, 51, 51));
+        m_print_button->SetLabel(_L("pause print"));
+        m_print_button->SetIcon("device_pause_print");
+        m_print_button->Refresh();
+        m_staticText_time_label->SetLabel(_L("Remaining Time"));
+        double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
+        m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
+    }
+    // 仅在设备状态真正切换时重排布局，避免每�?Layout() 造成的抖�?闪烁
+    if (devStateChanged) {
         Layout();
-    //}
+    }
+    UpdateScrollVirtualSize();
 }
 
 void SingleDeviceState::onCancelPrint(wxCommandEvent &event)
@@ -3091,6 +3812,7 @@ void SingleDeviceState::onContinuePrint(wxCommandEvent &event)
 
 void SingleDeviceState::onFileListClicked(wxMouseEvent& event) 
 {
+    Freeze();
     if (m_scrolledWindow && m_scrolledWindow->IsShown()) {
         m_panel_print_btn->Hide();
         m_scrolledWindow->Hide();
@@ -3102,8 +3824,10 @@ void SingleDeviceState::onFileListClicked(wxMouseEvent& event)
             m_curSelectedFileItem = nullptr;
         }
         m_timeLapseVideoPnl->Hide();
-        showMaterialStation(true);
+        //showMaterialStation(true);
         Layout();
+        UpdateScrollVirtualSize();
+        Thaw();
         return;
     }
 
@@ -3114,7 +3838,7 @@ void SingleDeviceState::onFileListClicked(wxMouseEvent& event)
     }
 
     if (m_scrolledWindow && !m_scrolledWindow->IsShown()) {
-         showMaterialStation(false);
+         //showMaterialStation(false);
          m_timeLapseVideoPnl->Hide();
          m_scrolledWindow->Scroll(0, 0);
          m_scrolledWindow->Refresh();
@@ -3123,6 +3847,8 @@ void SingleDeviceState::onFileListClicked(wxMouseEvent& event)
          m_FileList_split_line->Show();
     }
     Layout();
+    UpdateScrollVirtualSize();
+    Thaw();
 }
 
 void SingleDeviceState::onFileListRefreshBtnClicked(wxMouseEvent& event)
@@ -3251,14 +3977,15 @@ void SingleDeviceState::onLanThumbDownloadFinished(ComGetGcodeThumbEvent& event)
 
 void SingleDeviceState::onTimeLapseVideoBtnClicked(wxMouseEvent& event)
 {
+    Freeze();
     if (m_timeLapseVideoPnl->IsShown()) {   
         m_scrolledWindow->Hide();
         m_FileList_split_line->Hide();
         m_panel_print_btn->Hide();
         m_timeLapseVideoPnl->Hide();
-        showMaterialStation(true);
+        //showMaterialStation(true);
     } else {
-        showMaterialStation(false);
+        //showMaterialStation(false);
         m_scrolledWindow->Hide();
         m_FileList_split_line->Hide();
         m_panel_print_btn->Hide();
@@ -3266,6 +3993,8 @@ void SingleDeviceState::onTimeLapseVideoBtnClicked(wxMouseEvent& event)
         m_timeLapseVideoPnl->Show();
     }
     Layout();
+    UpdateScrollVirtualSize();
+    Thaw();
 }
 
 void SingleDeviceState::onDownloadImageFinished(FFDownloadFinishedEvent& event)
@@ -3346,34 +4075,68 @@ wxString SingleDeviceState::convertSecondsToHMS(int totalSeconds)
         return stream.str(); */
 }
 
+static std::string hlsUrlToFlv(const std::string &hls)
+{
+    if (hls.empty())
+        return hls;
+    std::string url = hls;
+    // 去掉查询参数
+    std::string::size_type q = url.find('?');
+    if (q != std::string::npos)
+        url.erase(q);
+    // 将结尾的 .m3u8 替换�?.flv
+    const std::string ext = ".m3u8";
+    if (url.size() >= ext.size() && url.compare(url.size() - ext.size(), ext.size(), ext) == 0)
+        url.replace(url.size() - ext.size(), ext.size(), ".flv");
+    return url;
+}
+
+void SingleDeviceState::updateDeviceInfoPanel(const com_dev_data_t& data)
+{
+    if (!data.devDetail || !m_busy_device_info) {
+        return;
+    }
+
+    const std::string machine_type = FFUtils::getPrinterName(data.devDetail->pid);
+    const std::string nozzle_model = data.devDetail->nozzleModel;
+    std::string       measure      = data.devDetail->measure;
+    if (!measure.empty()) measure.append("mm");
+
+    const std::string firmware_version = data.devDetail->firmwareVersion;
+    const std::string serial_number = data.connectMode == COM_CONNECT_LAN
+                                          ? data.lanDevInfo.serialNumber
+                                          : data.wanDevInfo.serialNumber;
+    const wxString cumulative_print_time = format_cumulative_print_time(*data.devDetail, data.connectMode);
+    const wxString cumulative_filament = format_cumulative_filament(data.devDetail->cumulativeFilament, data.connectMode);
+
+    m_busy_device_info->SetDeviceInfo(machine_type, nozzle_model, measure, firmware_version, serial_number,
+                                      cumulative_print_time, cumulative_filament, data.devDetail->ipAddr);
+}
+
 void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
 {
-    std::string state = data.devDetail->status; // 状态
+    if (!data.devDetail) {
+        return;
+    }
+    // Model, nozzle, firmware and SN are valid for both WAN and LAN. Display
+    // them as soon as devDetail exists, independently of dynamic WAN handling.
+    updateDeviceInfoPanel(data);
+    std::string state = data.devDetail->status; // 状�?
     if (wanDev) {
-        state = data.wanDevInfo.status;
+        state = wan_device_display_status(data);
     }
     onDevStateChanged(state, data);
-    if (state.compare("printing") == 0) {
+    if (state.compare("printing") == 0 && !m_isCloudState) {
         double estimatedTime = data.devDetail->estimatedTime; // 剩余时间
         m_staticText_count_time->SetLabel(convertSecondsToHMS(estimatedTime));
     }
 
     m_busy_lamp_bar->SetCameraState(false);
     m_idle_lamp_bar->SetCameraState(false);
-    std::string stram_url = data.devDetail->cameraStreamUrl;
-    if (!stram_url.empty() && m_camera_stream_url != data.devDetail->cameraStreamUrl) {
-       if (0 == data.connectMode) {
-            // 通知设备开流
-            ComCameraStreamCtrl *cameraStreamCtrl = new ComCameraStreamCtrl(OPEN);
-            Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, cameraStreamCtrl);
-        }
-
-        m_camera_stream_url = data.devDetail->cameraStreamUrl;
-        m_camera_panel->setStreamUrl(m_camera_stream_url);
-    } else if (stram_url.empty()) {
-        m_camera_panel->setOffline();
-    }
-    std::string device_name = data.devDetail->name;  //设备名
+    // 视频拉流不再跟随“当前选中设备”：改由“摄像头绑定设备�?m_camera_cur_id) 驱动�?
+    // 统一�?refreshCameraStream() 中处理，并由设备更新事件�?event.id==m_camera_cur_id 触发
+    // （切设备时画面保持旧设备，点摄像头按钮才切流，见 activateCameraForCurrentDevice）�?
+    std::string device_name = data.devDetail->name;  //设备�?
     if (m_cur_dev_name != device_name && !device_name.empty()) {
         m_cur_dev_name  = device_name;
         wxString u8_dev_name = wxString::FromUTF8(device_name);
@@ -3393,35 +4156,28 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
         m_staticText_device_position->SetToolTip(u8_dev_location);
     } 
 
-    std::string printFileName = data.devDetail->printFileName; // 文件名
-    if (m_cur_print_file_name != printFileName) {
-        m_cur_print_file_name       = printFileName;
-        //std::string truncatedString = FFUtils::truncateString(printFileName, TEXT_LENGTH);
-        wxString wxPrintFileName = wxString::FromUTF8(printFileName);
-        wxString truncatedString;
-        
-        if (wxPrintFileName.Length() > TEXT_LENGTH) {
-            truncatedString = wxPrintFileName.SubString(0, TEXT_LENGTH);
-            truncatedString.append("...");
-        } else {
-            truncatedString = wxPrintFileName;
-        }    
-        m_staticText_file_name->SetLabel(truncatedString);
-        m_staticText_file_name->SetToolTip(wxString::FromUTF8(printFileName));
-        m_staticText_file_name->Show();
-        m_staticText_file_name->Layout();
-        Layout();
+    if (!m_isCloudState) {
+        std::string printFileName = data.devDetail->printFileName; // 文件�?
+        setMaterialName(printFileName);
+        setMaterialPic(data);                                       // 图片地址
+        double total_weight = data.devDetail->estimatedRightWeight; // 材料重量
+        char   weight[64];
+        ::sprintf(weight, "  %.2f g", total_weight);
+        m_material_weight_label->SetLabel(weight);
     }
 
-    setMaterialPic(data);   //图片地址
+    // Temperature telemetry is present in devDetail for both LAN and WAN.
+    // WAN updates call fillValue(data, true), so this must be a common path.
+    setTempurature(data);
 
     if (!wanDev) {
-        double printProgress = data.devDetail->printProgress; // 打印进度
-        m_progress_bar->SetProgress(printProgress * 100);
+        if (!m_isCloudState) {
+            double printProgress = data.devDetail->printProgress; // 打印进度
+            m_progress_bar->SetProgress(printProgress * 100);
+            m_progress_bar->Show();
+        }
 
-        setTempurature(data);
-
-        std::string lightStatus = data.devDetail->lightStatus; // 灯状态
+        std::string lightStatus = data.devDetail->lightStatus; // 灯状�?
         /*if (data.devProduct->lightCtrlState == 1 && lightStatus.compare(CLOSE) == 0) {
             m_lamp_control_button->SetIcon("device_lamp_control");
             m_lamp_control_button->Refresh();
@@ -3433,9 +4189,9 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
             m_lamp_control_button->SetFlashForgeSelected(true);
             m_idle_tempMixDevice->modifyDeviceLampState(true);
         }*/
-        std::string internalFanStatus = data.devDetail->internalFanStatus; // 内循环状态
+        std::string internalFanStatus = data.devDetail->internalFanStatus; // 内循环状�?
         bool        internal_open     = internalFanStatus.compare(OPEN) ? false : true;
-        std::string externalFanStatus = data.devDetail->externalFanStatus; // 外循环状态
+        std::string externalFanStatus = data.devDetail->externalFanStatus; // 外循环状�?
         bool        external_open     = externalFanStatus.compare(OPEN) ? false : true;
         m_busy_circula_filter->setAirFilterState(internal_open, external_open);
         m_idle_tempMixDevice->modifyDeviceFilterState(internal_open, external_open);
@@ -3453,9 +4209,9 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
             m_idle_tempMixDevice->modifyG3UClearFanState(clear_fan_open);
         }
 
-        std::string rightFilamentType = data.devDetail->rightFilamentType; // 右喷头材料类型
+        std::string rightFilamentType = data.devDetail->rightFilamentType; // 右喷头材料类�?
         m_busy_device_detial->setMaterialName(rightFilamentType);
-        std::string leftFilamentType = data.devDetail->leftFilamentType; // 左喷头材料类型
+        std::string leftFilamentType = data.devDetail->leftFilamentType; // 左喷头材料类�?
         std::string leftFilament     = "L/2: ";
         m_busy_G3U_detail->setMaterialName(leftFilament + leftFilamentType);
         std::string rightFilament = "R/1: ";
@@ -3469,17 +4225,17 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
             m_busy_device_detial->setSpeed(printSpeedAdjust);
             m_busy_G3U_detail->setSpeed(printSpeedAdjust);
         }
-        double zAxisCompensation = data.devDetail->zAxisCompensation; // z轴坐标
+        double zAxisCompensation = data.devDetail->zAxisCompensation; // z轴坐�?
         if (data.devDetail->zAxisCompensation != m_last_z_axis_compensation) {
             m_last_z_axis_compensation = data.devDetail->zAxisCompensation;
             m_busy_device_detial->setZAxis(zAxisCompensation);
             m_busy_G3U_detail->setZAxis(zAxisCompensation);
         }
-        int printLayer       = data.devDetail->printLayer;       // 当前层
+        int printLayer       = data.devDetail->printLayer;       // 当前�?
         int targetPrintLayer = data.devDetail->targetPrintLayer; // 目标层数
         m_busy_device_detial->setLayer(printLayer, targetPrintLayer);
         m_busy_G3U_detail->setLayer(printLayer, targetPrintLayer);
-        double fillAmount = data.devDetail->fillAmount; // 填充率
+        double fillAmount = data.devDetail->fillAmount; // 填充�?
         m_busy_device_detial->setFillRate(fillAmount);
         m_busy_G3U_detail->setFillRate(fillAmount);
         double coolingFanSpeed = data.devDetail->coolingFanSpeed; // 喷头风扇
@@ -3488,7 +4244,7 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
             m_busy_device_detial->setCoolingFanSpeed(coolingFanSpeed);
             m_busy_G3U_detail->setCoolingFanSpeed(coolingFanSpeed);
         }
-        double leftCoolingFanSpeed = data.devDetail->coolingFanLeftSpeed; // 左喷头风扇
+        double leftCoolingFanSpeed = data.devDetail->coolingFanLeftSpeed; // 左喷头风�?
         if (data.devDetail->coolingFanLeftSpeed != m_last_left_cooling_fan_speed) {
             m_last_left_cooling_fan_speed = data.devDetail->coolingFanLeftSpeed;
             m_busy_G3U_detail->setLeftCoolingFanSpeed(leftCoolingFanSpeed);
@@ -3531,22 +4287,10 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
         std::string measure     = data.devDetail->measure;     // 打印尺寸
         measure.append("mm");
         std::string firmwareVersion    = data.devDetail->firmwareVersion; // 固件版本
-        std::string serialNubmer       = data.connectMode == 0 ? data.lanDevInfo.serialNumber : data.wanDevInfo.serialNumber; // 序列号
-        double      time               = 0;
-        if (data.connectMode == 0) {//内网数据以分钟为单位
-            time = data.devDetail->cumulativePrintTime / 60;
-        } else if (data.connectMode == 1) {//外网小时为单位
-            time = data.devDetail->cumulativePrintTime;
-        }    
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(2) << time;
-        std::string cumulativePrintTime   = oss.str() + " hours";
-        double      cumulativeFilament = data.devDetail->cumulativeFilament; // 丝料统计
-        wxString    strCumulativeFilament = wxString::Format("%.2f", cumulativeFilament);
-        strCumulativeFilament.append("m");
+        std::string serialNubmer       = data.connectMode == 0 ? data.lanDevInfo.serialNumber : data.wanDevInfo.serialNumber; // 序列�?
+        wxString cumulativePrintTime = format_cumulative_print_time(*data.devDetail, data.connectMode);
+        wxString strCumulativeFilament = format_cumulative_filament(data.devDetail->cumulativeFilament, data.connectMode);
         std::string ipAddr = data.devDetail->ipAddr; // ip地址
-        m_busy_device_info->SetDeviceInfo(machineType, nozzleModel, measure, firmwareVersion, serialNubmer, cumulativePrintTime,
-            strCumulativeFilament, ipAddr);
         m_idle_tempMixDevice->modifyDeviceInfo(machineType, nozzleModel, measure, firmwareVersion, serialNubmer, cumulativePrintTime,
                                                strCumulativeFilament, ipAddr);
         m_idle_tempMixDevice->setDisabledMoveCtrl(data.devDetail->moveCtrl != 1);
@@ -3555,12 +4299,163 @@ void SingleDeviceState::fillValue(const com_dev_data_t& data,bool wanDev)
     }
 }
 
-void SingleDeviceState::setPageOffline() 
+void SingleDeviceState::fillCloudValue(const fnet_slice_state_t& data)
 {
+    // fnet_slice_state �?char* 字段可能�?null（云端某些状态不�?fileName/thumb 等）�?
+    // 直接�?null 构�?std::string 会崩（strlen(null)）。这里统一归一化为安全�?std::string�?
+    std::string cloud_id        = data.id ? data.id : "";
+    std::string cloud_status    = data.status ? data.status : "";
+    std::string cloud_file_name = data.fileName ? data.fileName : "";
+    std::string cloud_thumb     = data.thumbImagePath ? data.thumbImagePath : "";
+
+    m_isCloudState = true;
+    m_staticText_count_time->Hide();
+    m_staticText_time_label->Hide();
+    m_staticText_device_info->Hide();
+    m_print_button->Hide();
+    m_cancel_button->Hide();
+    m_staticText_time_label->Hide();
+    m_staticText_count_time->Hide();
+    m_panel_control_print->Hide();
+    m_panel_control_cloud->Show();
+    m_clear_button->Hide();
+    m_tempCtrl_panel->SwitchTargetTemp(false);
+    if (m_machine_idle_panel->IsShown()) {
+        showMaterialStation(true);
+        m_scrolledWindow->Hide();
+        m_FileList_split_line->Hide();
+        m_panel_print_btn->Hide();
+        m_timeLapseVideoPnl->Hide();
+        m_panel_idle_text->Hide();
+    }
+    m_machine_ctrl_panel->Show();
+    m_machine_ctrl_info_panel->Show();
+    m_machine_idle_panel->Hide();
+    m_machine_idle_info_panel->Hide();
+    m_nozzles->SetCurState(false);
+    wxString print_state = _L("busy");
+    setTipMessage(print_state, "#F9B61C");
+    m_slice_task_id = cloud_id;
+    setMaterialName(cloud_file_name);
+    m_file_pic_url                 = cloud_thumb;
+    m_file_pic_name                = "";
+    m_download_title_image_task_id = m_download_tool.downloadMem(m_file_pic_url, 30000, 60000);
+    double total_weight = data.weight;
+    char   weight[64];
+    ::sprintf(weight, "  %.2f g", total_weight);
+    m_material_weight_label->SetLabel(weight);
+    if (cloud_status == "QUEUE") {
+        m_staticText_cloud_text->SetForegroundColour(wxColour(50, 141, 251));
+        m_staticText_cloud_text->SetLabel(_L("Cloud slicing queued..."));
+        m_staticText_cloud_text->Show();
+        m_staticText_cloud_queue_tip->Show();
+        m_staticText_cloud_queue_count->SetLabel(wxString::Format("%d", data.waitingCount));
+        m_staticText_cloud_queue_count->Show();
+        m_staticText_cloud_queue_text->Show();
+        m_progress_bar->SetProgress(0);
+        m_progress_bar->Show();
+        m_cancel_queue_button->Show();
+        m_cancel_queue_button->SetLabel(_L("Cancel Queue"));
+        m_cancel_slice_button->Hide();
+        m_retry_print_button->Hide();
+    } else if (cloud_status == "SLICING") {
+        m_staticText_cloud_text->SetForegroundColour(wxColour(50, 141, 251));
+        m_staticText_cloud_text->SetLabel(_L("Cloud task is slicing..."));
+        m_staticText_cloud_text->Show();
+        m_staticText_cloud_queue_tip->Hide();
+        m_staticText_cloud_queue_count->Hide();
+        m_staticText_cloud_queue_text->Hide();
+        m_progress_bar->SetProgress(data.percentage);
+        m_progress_bar->Show();
+        m_cancel_queue_button->Show();
+        m_cancel_queue_button->SetLabel(_L("Cancel Slicing"));
+        m_cancel_slice_button->Hide();
+        m_retry_print_button->Hide();
+    } else if (cloud_status == "FAILED") {
+        m_staticText_cloud_text->SetLabel(_L("Failed. Please try printing again."));
+        m_staticText_cloud_text->SetForegroundColour(wxColour(251, 71, 71));
+        m_staticText_cloud_text->Show();
+        m_staticText_cloud_queue_tip->Hide();
+        m_staticText_cloud_queue_count->Hide();
+        m_staticText_cloud_queue_text->Hide();
+        m_progress_bar->SetProgress(0);
+        m_progress_bar->Show();
+        m_cancel_queue_button->Hide();
+        m_cancel_slice_button->Show();
+        m_retry_print_button->Show();
+    } else if (cloud_status == "CANCELED") {
+        m_isCloudState = false;
+    }
+    Layout();
+}
+
+void SingleDeviceState::fillJobValue(const fnet_job_info_t& info)
+{ 
+    m_isCloudState = true;
+    m_staticText_count_time->Hide();
+    m_staticText_time_label->Hide();
+    m_staticText_device_info->Hide();
+    m_clear_button->Hide();
+    m_tempCtrl_panel->SwitchTargetTemp(false);
+    m_print_button->Hide();
+    m_cancel_button->Hide();
+    m_staticText_time_label->Hide();
+    m_staticText_count_time->Hide();
+    m_panel_control_print->Hide();
+    m_panel_control_cloud->Hide();
+    if (m_machine_idle_panel->IsShown()) {
+        showMaterialStation(true);
+        m_scrolledWindow->Hide();
+        m_FileList_split_line->Hide();
+        m_panel_print_btn->Hide();
+        m_timeLapseVideoPnl->Hide();
+        m_panel_idle_text->Hide();
+    }
+    m_machine_ctrl_panel->Show();
+    m_machine_ctrl_info_panel->Show();
+    m_machine_idle_panel->Hide();
+    m_machine_idle_info_panel->Hide();
+    m_nozzles->SetCurState(false);
+    wxString print_state = _L("busy");
+    setTipMessage(print_state, "#F9B61C");
+    m_staticText_cloud_text->SetForegroundColour(wxColour(50, 141, 251));
+    m_panel_control_cloud->Hide();
+    m_staticText_cloud_queue_tip->Hide();
+    m_staticText_cloud_queue_count->Hide();
+    m_staticText_cloud_queue_text->Hide();
+
+    if (std::string(info.status) == "downloading") {
+        m_staticText_cloud_text->SetLabel(_L("Downloading cloud task..."));
+        m_staticText_cloud_text->Show();
+        m_progress_bar->SetProgress(info.percentage);
+        m_progress_bar->Show();
+    } else {
+        m_isCloudState = false;
+    }
+    if (std::string(info.status) == "unzipping") {
+        m_staticText_cloud_text->SetLabel(_L("Extracting files, please wait..."));
+        m_staticText_cloud_text->Show();
+        m_progress_bar->Hide();
+    } else {
+        m_isCloudState = false;
+    }
+    
+    Layout();
+}
+
+void SingleDeviceState::setPageOffline()
+{
+    m_device_page_state = DevicePageState::Offline;
+    if (m_camera_panel) m_camera_panel->logPanelState("setPageOffline enter");
+   camdbg_log("setPageOffline called -> device offline (MQTT), tearing down page only; camera left intact (decoupled, driven by stream health)");
    // 离线
     m_cur_id = -1;
+    // 批量 Show/Hide/Layout 期间冻结重绘，避免多次中间重绘造成卡顿（解绑正在播放的
+    // 当前设备时，本函数会与视频拆除在同一 UI 事件里执行，冻结可显著减轻卡顿感）�?
+    Freeze();
     if (m_isNozzlesPrinter) {
         m_nozzles->SetCurId(m_cur_id);
+        m_nozzles->SetOffline();
     } else {
         m_material_station->show_material_panel(false);
         m_material_station->setCurId(m_cur_id);
@@ -3576,20 +4471,160 @@ void SingleDeviceState::setPageOffline()
         m_busyState_bottom_gap->Show();
         m_offline_info_page_gap->Show();
     }
+    unbind_ts("B1a. setPageOffline: nozzles/material + Show/Hide 完成");
     m_tempCtrl_panel->ReInitTempature(-1);
+    unbind_ts("B1b. setPageOffline: ReInitTempature 完成");
     m_idle_tempMixDevice->Show();
     m_machine_idle_panel->Show();
     m_machine_idle_info_panel->Show();
     m_machine_ctrl_info_panel->Hide();
     m_machine_ctrl_panel->Hide();
-    m_camera_panel->setOffline();
+    // 设备离线与摄像头离线解耦：不再因整机离线（�?20s 心跳超时的误�?短暂 flap�?
+    // 就强制把摄像头断开。摄像头的在�?断开由它自身的流健康度决定—�?
+    // 拉流正常就继续显示，拉流真正失败时由 FFRTMPVideoCtrl 的重�?占位逻辑自行处理�?
+    // m_camera_panel->setOffline();   // 解耦：移除对摄像头的强制断开
+    unbind_ts("B1c. setPageOffline: reInit BEGIN");
     reInit();
+    if (m_camera_panel) m_camera_panel->logPanelState("setPageOffline after reInit before Thaw");
+    unbind_ts("B1d. setPageOffline: reInit END; Thaw BEGIN (Thaw 会触发真正重�?");
+    Thaw();  // 与上面的 Freeze() 配对，统一刷新一�?
+    if (m_camera_panel) m_camera_panel->logPanelState("setPageOffline after Thaw");
+    unbind_ts("B1e. setPageOffline: Thaw END");
+}
+
+void SingleDeviceState::refreshCameraStream()
+{
+    // 按“摄像头绑定设备�?m_camera_cur_id) 驱动视频流，与页面选中设备(m_cur_id)解耦�?
+    // 关键：设备状态走 MQTT，视频流走的是另一台流媒体服务器，两者相互独立�?
+    // 因此设备(MQTT)离线并不代表视频流断——只要流正常就保持画面不变，绝不因设备状�?
+    // 主动 setOffline。真正的流中断由 FFRTMPVideoCtrl 自身的重�?占位逻辑处理�?
+    if (!m_camera_panel || m_camera_cur_id < 0) {
+        camera_capability_log(
+            "refresh skipped: panel=" + std::string(m_camera_panel ? "present" : "null")
+            + " cameraComId=" + std::to_string(m_camera_cur_id)
+            + " currentComId=" + std::to_string(m_cur_id));
+        return;
+    }
+    bool valid = false;
+    const com_dev_data_t &data = MultiComMgr::inst()->devData(m_camera_cur_id, &valid);
+    if (!valid) {
+        camera_capability_log(
+            "refresh skipped: device data invalid, cameraComId="
+            + std::to_string(m_camera_cur_id)
+            + " currentComId=" + std::to_string(m_cur_id));
+        return;  // 设备数据暂不可用：保持当前视频流不变
+    }
+    if (data.devDetail == nullptr) {
+        camera_capability_log(
+            "refresh skipped: devDetail=null, cameraComId="
+            + std::to_string(m_camera_cur_id)
+            + " currentComId=" + std::to_string(m_cur_id)
+            + " connectMode=" + std::to_string(static_cast<int>(data.connectMode))
+            + " detailUpdated=" + std::string(data.devDetailUpdated ? "true" : "false"));
+        return;
+    }
+
+    const char *camera_stream_url = data.devDetail->cameraStreamUrl;
+    const bool stream_url_present = camera_stream_url != nullptr && camera_stream_url[0] != '\0';
+    const bool uses_stream_url_capability =
+        data.connectMode == COM_CONNECT_LAN
+        && (data.devDetail->pid == ADVENTURER_5M || data.devDetail->pid == ADVENTURER_5M_PRO);
+    // Adventurer 5M series uses the presence of a stream URL as the availability
+    // signal in LAN mode. All other cases use the explicit camera field.
+    bool camera_available = uses_stream_url_capability ? stream_url_present : data.devDetail->camera == 1;
+
+    if (data.devDetail->pid == GUIDER_3_ULTRA) {
+        camera_available = true;
+    }
+
+    camera_capability_log(
+        "refresh: cameraComId=" + std::to_string(m_camera_cur_id)
+        + " currentComId=" + std::to_string(m_cur_id)
+        + " connectMode=" + std::to_string(static_cast<int>(data.connectMode))
+        + " detailUpdated=" + std::string(data.devDetailUpdated ? "true" : "false")
+        + " usesStreamUrlCapability=" + std::string(uses_stream_url_capability ? "true" : "false")
+        + " cameraRaw=" + std::to_string(data.devDetail->camera)
+        + " cameraAvailable=" + std::string(camera_available ? "true" : "false")
+        + " streamUrlPresent=" + std::string(stream_url_present ? "true" : "false")
+        + " streamUrl=" + (camera_stream_url != nullptr ? camera_stream_url : "<null>"));
+
+    m_camera_panel->setCameraAvailable(camera_available);
+    if (!camera_available) {
+        m_camera_stream_url.clear();
+        return;
+    }
+    if (!stream_url_present) {
+        return;
+    }
+
+    const std::string source_url = camera_stream_url;
+    // The LAN detail response already contains the address expected by the
+    // printer's local camera service. Keep it unchanged; protocol conversion
+    // is only applicable to remote/WAN stream addresses.
+
+    std::string stream_url = source_url;
+
+    if(data.connectMode == COM_CONNECT_WAN) {
+        stream_url = switch_camera_stream_url(source_url, g_camera_stream_protocol);
+    } else if(data.connectMode == COM_CONNECT_LAN) {
+
+    }
+
+    if (!stream_url.empty() && m_camera_stream_url != stream_url) {
+        m_camera_stream_url = stream_url;
+        m_camera_panel->setStreamUrl(m_camera_stream_url);
+    }
+}
+
+void SingleDeviceState::switchCameraStreamTo(int comId)
+{
+    // 把摄像头视频流切换到指定设备（切设备/点摄像头按钮均走此处）�?
+    if (!m_camera_panel || comId < 0 || comId == m_camera_cur_id) {
+        return;
+    }
+    m_camera_cur_id = comId;
+    m_camera_stream_url.clear();          // 强制 refreshCameraStream 按新设备重新 setStreamUrl
+    m_camera_panel->setCurComId(comId);
+    // 切设备后与“首次进入设备页”保持一致：新设备起流默认进入暂�?缺省�?播放按钮)�?
+    // 不沿用上一台设备的播放/暂停状态�?
+    m_camera_panel->setStartPausedPreference(true);
+    refreshCameraStream();                // 立即按新设备拉流（地址未到时由后续遥测事件补触发）
+}
+
+void SingleDeviceState::activateCameraForCurrentDevice()
+{
+    if (!m_camera_panel) {
+        return;
+    }
+    // 点摄像头按钮：确保绑定到当前选中设备（通常切设备时已切好，这里兜底），再弹窗显示�?
+    switchCameraStreamTo(m_cur_id);
+    m_camera_panel->showPopup();
 }
 
 std::string SingleDeviceState::getCurLanguage() 
 {
     AppConfig *app_config = wxGetApp().app_config; 
     return  app_config->get("language");
+}
+
+void SingleDeviceState::setMaterialName(const std::string& printFileName)
+{
+    if (m_cur_print_file_name != printFileName) {
+        m_cur_print_file_name = printFileName;
+        wxString wxPrintFileName = wxString::FromUTF8(printFileName);
+        wxString elideString = FFUtils::elideString(m_staticText_file_name, wxPrintFileName, FromDIP(PRINT_FILE_NAME_WIDTH));
+        m_staticText_file_name->SetLabel(elideString);
+        m_staticText_file_name->SetToolTip(wxPrintFileName);
+        m_staticText_file_name->Show();
+        m_staticText_file_name->Layout();
+        if (wxWindow* file_name_panel = m_staticText_file_name->GetParent()) {
+            file_name_panel->Layout();
+            if (wxWindow* file_info_panel = file_name_panel->GetParent()) {
+                file_info_panel->Layout();
+            }
+        }
+        Layout();
+    }
 }
 
 void SingleDeviceState::setMaterialPic(const com_dev_data_t &data)
@@ -3600,14 +4635,16 @@ void SingleDeviceState::setMaterialPic(const com_dev_data_t &data)
     if (data.connectMode == COM_CONNECT_LAN) {
        if (m_file_pic_name == file_pic_name || file_pic_name.empty() || file_pic_path.empty())
             return;
-    } else if (data.connectMode == COM_CONNECT_WAN) {
-       if (m_file_pic_url == file_pic_path || file_pic_path.empty())
-            return;
-    } else {
-       return;
+    }
+ else if (data.connectMode == COM_CONNECT_WAN) {
+     if (m_file_pic_url == file_pic_path || file_pic_path.empty())
+         return;
+    }
+ else {
+     return;
     }
 
-    m_file_pic_url  = file_pic_path;
+    m_file_pic_url = file_pic_path;
     m_file_pic_name = file_pic_name;
     m_download_title_image_task_id = m_download_tool.downloadMem(m_file_pic_url, 30000, 60000);
 }
@@ -3616,20 +4653,20 @@ void SingleDeviceState::setTempurature(const com_dev_data_t& data)
 {
     m_tempCtrl_panel->UpdateTempatrue(data);
     //if (m_pid == GUIDER_3_ULTRA) {
-    //   // 右喷头温度
+    //   // 右喷头温�?
     //   double rightTemp = data.devDetail->rightTemp;
     //   m_tempCtrl_top->SetCurrTemp(rightTemp, true);
-    //   // 右喷头目标温度
+    //   // 右喷头目标温�?
     //   double rightTargetTemp = data.devDetail->rightTargetTemp;
     //   if (m_right_target_temp != rightTargetTemp) {
     //        m_right_target_temp = rightTargetTemp;
     //        m_tempCtrl_top->SetTagTemp(rightTargetTemp, true);
     //   }
 
-    //   // 左喷头温度
+    //   // 左喷头温�?
     //   double leftTemp = data.devDetail->leftTemp;
     //   m_tempCtrl_bottom->SetCurrTemp(leftTemp, true);
-    //   // 左喷头目标温度
+    //   // 左喷头目标温�?
     //   double leftTargetTemp = data.devDetail->leftTargetTemp; 
     //   if (m_plat_target_temp != leftTargetTemp) {
     //        m_plat_target_temp = leftTargetTemp;
@@ -3658,9 +4695,9 @@ void SingleDeviceState::setTempurature(const com_dev_data_t& data)
     //                                    platTempTargetTemp);
 
     //} else {
-    //   double rightTemp = data.devDetail->rightTemp; // 右喷头温度
+    //   double rightTemp = data.devDetail->rightTemp; // 右喷头温�?
     //   m_tempCtrl_top->SetCurrTemp(rightTemp, true);
-    //   double rightTargetTemp = data.devDetail->rightTargetTemp; // 右喷头目标温度
+    //   double rightTargetTemp = data.devDetail->rightTargetTemp; // 右喷头目标温�?
     //   if (m_right_target_temp != rightTargetTemp) {
     //        m_right_target_temp = rightTargetTemp;
     //        m_tempCtrl_top->SetTagTemp(rightTargetTemp, true);
@@ -3691,6 +4728,29 @@ void SingleDeviceState::setTempurature(const com_dev_data_t& data)
     //   m_idle_tempMixDevice->modifyTemp(modify_nozzle_temp, modify_plat_temp, modify_chamber_temp, rightTargetTemp, platTargetTemp,
     //                                    chamberTargetTemp);
     //}
+}
+
+void SingleDeviceState::setIdlePrinterText(bool isOffline)
+{
+    wxString str;
+    if (isOffline) {
+        str = "Device offline";
+    }
+    else {
+        if (FFUtils::isNozzlesPrinter(FFUtils::getPid(m_cur_id))) {
+            str = HAS_NO_PRINTING_U1;
+        } else {
+            str = HAS_NO_PRINTING;
+        }
+    }
+    m_staticText_idle->SetLabel(_L(str));
+    wxClientDC idle_text_dc(m_staticText_idle);
+    idle_text_dc.SetFont(m_staticText_idle->GetFont());
+    wxSize idle_text_size = idle_text_dc.GetMultiLineTextExtent(_L(str));
+    m_staticText_idle->SetMinSize(wxSize(idle_text_size.x + FromDIP(4), idle_text_size.y));
+    if (m_staticText_idle->GetParent()) {
+        m_staticText_idle->GetParent()->Layout();
+    }
 }
 
 void SingleDeviceState::splitIdleTextLabel()
@@ -3769,7 +4829,8 @@ LampToolBar::LampToolBar(wxWindow* parent) :
     sizer->Add(m_lamp_btn, 0, wxALL, 0);
     sizer->AddSpacer(FromDIP(10));
     sizer->Add(m_camera_btn, 0, wxALL, 0);
-    SetSizerAndFit(sizer);
+    m_camera_btn->Hide();
+    SetSizer(sizer);
     Layout();
 }
 
@@ -3781,17 +4842,21 @@ void LampToolBar::lamp_btn_clicked(wxMouseEvent& event)
          Slic3r::GUI::ComLightCtrl *lightctrl = new Slic3r::GUI::ComLightCtrl(CLOSE);
          // 测试，临时将id写死
          if (m_cur_id >= 0) {
-             Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, lightctrl);
+             bool ok = Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, lightctrl);
+             camdbg_log("light CLOSE putCommand=" + std::string(ok ? "ok" : "rejected")
+                        + " id=" + std::to_string(m_cur_id));
          }
          m_lamp_btn->SetIcon("device_lamp_control");
          m_lamp_btn->Refresh();
          m_lamp_btn->SetFlashForgeSelected(false);
      } else {
-         // 开灯
+         // 开�?
          Slic3r::GUI::ComLightCtrl *lightctrl = new Slic3r::GUI::ComLightCtrl(OPEN);
          // 测试，临时将id写死
          if (m_cur_id >= 0) {
-             Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, lightctrl);
+             bool ok = Slic3r::GUI::MultiComMgr::inst()->putCommand(m_cur_id, lightctrl);
+             camdbg_log("light OPEN putCommand=" + std::string(ok ? "ok" : "rejected")
+                        + " id=" + std::to_string(m_cur_id));
          }
          m_lamp_btn->SetIcon("device_lamp_control_press");
          m_lamp_btn->Refresh();
@@ -3804,17 +4869,11 @@ void LampToolBar::SetCurId(com_id_t curId)
     m_cur_id = curId; 
 }
 
-void LampToolBar::BindCamera(PrinterCameraPanel* camera) 
-{ 
+void LampToolBar::BindCamera(FFRTMPVideoCtrl* camera, std::function<void()> onActivate)
+{
     if (camera == nullptr) {
         return;
     }
-    m_camera = camera; 
-    m_camera_btn->Bind(wxEVT_BUTTON, [=](wxCommandEvent& event) { 
-        CallAfter([=]() { 
-            m_camera->showPopup(); 
-        });
-    });
 }
 
 void LampToolBar::SetLampState(bool isOffline, bool isOpen) 
@@ -3837,15 +4896,21 @@ void LampToolBar::SetLampState(bool isOffline, bool isOpen)
     }
 }
 
+void LampToolBar::SetCameraVisible(bool visible)
+{
+    /*m_camera_btn->Show(visible);
+    Layout();*/
+}
+
 void LampToolBar::SetCameraState(bool isOffline) 
 { 
-    m_camera_btn->Enable(!isOffline); 
+    /*m_camera_btn->Enable(!isOffline);
     if (isOffline) {
         m_camera_btn->SetIcon("camera_button_offline");
     } else {
         m_camera_btn->SetIcon("camera_button");
     }
-    m_camera_btn->Refresh();
+    m_camera_btn->Refresh();*/
 }
 
 }}

@@ -10,14 +10,19 @@
     "bed_mesh_max": "99999,99999",
     "bed_mesh_min": "-99999,-99999",
     "bed_mesh_probe_distance": "50,50",
+    "bed_temperature_formula": "by_highest_temp",
     "before_layer_change_gcode": ";BEFORE_LAYER_CHANGE\n;[layer_z]",
     "best_object_pos": "0.5,0.5",
     "change_extrusion_role_gcode": "",
     "change_filament_gcode": "",
     "cooling_tube_length": "0",
     "cooling_tube_retraction": "0",
+    "default_bed_type": "",
     "default_filament_profile": [
         "Flashforge Generic PLA @G3U 0.6 Nozzle"
+    ],
+    "default_nozzle_volume_type": [
+        "Standard"
     ],
     "default_print_profile": "0.30mm Standard @Flashforge G3U 0.6 Nozzle",
     "deretraction_speed": [
@@ -27,6 +32,7 @@
     "emit_machine_limits_to_gcode": "1",
     "enable_filament_ramming": "0",
     "enable_long_retraction_when_cut": "0",
+    "enable_power_loss_recovery": "printer_configuration",
     "extra_loading_move": "0",
     "extruder_clearance_height_to_lid": "165",
     "extruder_clearance_height_to_rod": "42",
@@ -37,17 +43,31 @@
     "extruder_offset": [
         "0x0"
     ],
+    "extruder_printable_area": [],
+    "extruder_printable_height": [
+        "0"
+    ],
+    "extruder_type": [
+        "Direct Drive"
+    ],
+    "extruder_variant_list": [
+        "Direct Drive Standard"
+    ],
     "fan_kickstart": "0",
     "fan_speedup_overhangs": "1",
     "fan_speedup_time": "0",
     "from": "system",
+    "setting_id": "YhHvRWwxThp9paux",
     "instantiation": "true",
+    "file_start_gcode": "",
     "gcode_flavor": "klipper",
+    "grab_length": [
+        "0"
+    ],
     "head_wrap_detect_zone": [],
     "high_current_on_filament_swap": "0",
     "host_type": "octoprint",
     "inherits": "Flashforge Guider 3 Ultra 0.6 Nozzle",
-    "is_custom_defined": "0",
     "layer_change_gcode": ";AFTER_LAYER_CHANGE\n;[layer_z]",
     "long_retractions_when_cut": [
         "0"
@@ -98,6 +118,9 @@
         "3",
         "3"
     ],
+    "machine_max_junction_deviation": [
+        "0.01"
+    ],
     "machine_max_speed_e": [
         "40",
         "30"
@@ -127,22 +150,35 @@
     "machine_tool_change_time": "0",
     "machine_unload_filament_time": "50",
     "manual_filament_change": "0",
+    "master_extruder_id": "1",
     "max_layer_height": [
         "0.42"
     ],
+    "max_resonance_avoidance_speed": "120",
     "min_layer_height": [
         "0.15"
     ],
     "name": "Flashforge Guider4 0.6 HF nozzle",
+    "min_resonance_avoidance_speed": "70",
     "nozzle_diameter": [
-        "0.6HF"
+        "0.6"
+    ],
+    "nozzle_flush_dataset": [
+        "0"
     ],
     "nozzle_height": "4",
     "nozzle_hrc": "0",
-    "nozzle_type": "stainless_steel",
-    "nozzle_volume": "0",
+    "nozzle_type": [
+        "stainless_steel"
+    ],
+    "nozzle_volume": [
+        "0"
+    ],
     "parking_pos_retraction": "0",
     "pellet_modded_printer": "0",
+    "physical_extruder_map": [
+        "0"
+    ],
     "preferred_orientation": "0",
     "printable_area": [
         "0x0",
@@ -151,6 +187,13 @@
         "0x300"
     ],
     "printable_height": "301",
+    "printer_agent": "",
+    "printer_extruder_id": [
+        "1"
+    ],
+    "printer_extruder_variant": [
+        "Direct Drive Standard"
+    ],
     "printer_model": "Flashforge Guider4",
     "printer_notes": "",
     "printer_settings_id": "Flashforge Guider4 0.6 HF nozzle",
@@ -161,6 +204,7 @@
     "printhost_ssl_ignore_revoke": "0",
     "printing_by_object_gcode": "",
     "purge_in_prime_tower": "0",
+    "resonance_avoidance": "0",
     "retract_before_wipe": [
         "100%"
     ],
@@ -203,6 +247,7 @@
     "support_air_filtration": "1",
     "support_chamber_temp_control": "1",
     "support_multi_bed_types": "1",
+    "support_object_skip_flush": "0",
     "template_custom_gcode": "",
     "thumbnails": "140x110/PNG",
     "thumbnails_format": "PNG",
@@ -221,6 +266,10 @@
     "wipe_distance": [
         "2.2"
     ],
+    "wipe_tower_type": "type1",
+    "wrapping_detection_gcode": "",
+    "wrapping_detection_layers": "20",
+    "wrapping_exclude_area": [],
     "z_hop": [
         "0.4"
     ],

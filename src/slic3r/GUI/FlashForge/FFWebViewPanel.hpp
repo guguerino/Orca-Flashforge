@@ -181,7 +181,9 @@ public:
     FFWebViewPanel(wxWindow *parent);
     
     void RunScript(const wxString &jsStr);
-    void SendRecentList(int images);
+    void SendRecentList();
+    // Upstream (Orca) cloud-provider panel hook; Flash Studio's homepage has no provider list.
+    void SendCloudProvidersInfo() {}
     void ShowModelDetail(const std::string &data);
     bool ProcComBusGetRequest(const ComBusGetRequestEvent &evt);
     bool ProcComBusPostRequest(const ComBusPostRequestEvent &evt);
@@ -191,9 +193,23 @@ public:
     void Rescale();
 
 private:
+    enum class SecondaryPageMode
+    {
+        None,
+        ModelDetail,
+        EmbeddedPage
+    };
+
     bool InitBrowser();
     void InitModelNav();
     void SetMainLayout();
+    bool OpenEmbeddedPage(const wxString &url, const wxString &title);
+    bool RequestEmbeddedCheckout(const wxString &url, const wxString &title);
+    void RouteMainNewWindowUrl(const wxString &url);
+    void SetEmbeddedPageTitle(const wxString &title);
+    bool IsAllowedEmbeddedPageUrl(const wxString &url) const;
+    bool IsSafeEmbeddedNavigationUrl(const wxString &url) const;
+    void SetupSecondaryNavigation();
     void CheckGetSystemI18nConfig();
     void PostGetSystemI18nConfig();
     void ProcessGetSystemI18nConfig(const ComBusGetRequestEvent &evt);
@@ -204,9 +220,11 @@ private:
     void PostGetDownloadScript();
     void ProcessGetDownloadScript(const ComBusGetRequestEvent &evt);
     bool IsUserConfigOk();
+    void SetupLikeButton();
     void SetupBackButton();
     void SetupPrintListButton(bool printListAdded);
     void SetupSystemI18n();
+    void ResetModelBrowserUserScripts();
     void SetupDownloadScript();
     void MoveViewNowWindow();
     void ReportTrackingData(const std::string &eventType, const std::string &eventName);
@@ -216,6 +234,7 @@ private:
     void OnHideButton(wxCommandEvent &evt);
     void OnBackButton(wxCommandEvent &evt);
     void OnMoreButton(wxCommandEvent &evt);
+    void OnLikeButton(wxCommandEvent& evt);
     void OnPrintListButton(wxCommandEvent &evt);
     void OnMoreMenu(wxCommandEvent &evt);
     void OnReportButton(wxCommandEvent &evt);
@@ -237,7 +256,8 @@ private:
     void OnComMaintain(ComWanDevMaintainEvent &evt);
     void OnComGetUserProfile(ComGetUserProfileEvent &evt);
     void OnComAddPrintListModel(ComBusRequestEvent &evt);
-    void OnComRemovePrintListModel(ComBusRequestEvent &evt);
+    void OnComRemovePrintListModel(ComBusRequestEvent& evt);
+    void OnComLikeModel(ComBusRequestEvent& evt);
     void OnComReportModel(ComBusRequestEvent &evt);
     wxString GetModelUrlId(const wxString &url);
 
@@ -248,6 +268,7 @@ private:
     wxStaticText       *m_navDetailLbl;
     FFPushButton       *m_navBackBtn;
     FFPushButton       *m_navMoreBtn;
+    FFButton           *m_navLikeBtn;
     FFButton           *m_navPrintListBtn;
     NavMoreMenu        *m_navMoreMenu;
     PrintListTipWindow *m_viewNowWindow;
@@ -270,8 +291,11 @@ private:
     wxString            m_reportMenuText;
     wxString            m_addPrintListText;
     wxString            m_removePrintListText;
+    bool                m_modelLike;
+    int                 m_modelLikeCount;
     wxString            m_modelPersonalizedRecText;
-    wxString            m_viewNowTipText;
+    wxString            m_addPrintListTipText;
+    wxString            m_removePrintListTipText;
     wxString            m_reportWndTitle;
     bool                m_showWebviewBackButton;
     bool                m_autoOpenDownloadLink;
@@ -294,6 +318,13 @@ private:
     std::shared_ptr<CheckDownloadUrl>  m_checkDownloadUrl;
     std::shared_ptr<OpenBase64Model>   m_openBase64Model;
     std::vector<std::pair<wxString, wxString>> m_modelBackUrls;
+    SecondaryPageMode m_secondaryPageMode{SecondaryPageMode::None};
+    wxString          m_embeddedPageTitle;
+    wxString          m_pendingEmbeddedPageUrl;
+    wxString          m_pendingEmbeddedPageTitle;
+    uint64_t          m_externalOpenGeneration{0};
+    bool              m_embeddedPageOpenPending{false};
+    bool              m_clearModelBrowserHistoryOnNextLoad{false};
 };
 
 }} // namespace Slic3r::GUI

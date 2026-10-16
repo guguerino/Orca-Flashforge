@@ -1,4 +1,7 @@
 {
+    "compatible_printers": [
+        "Flashforge Guider4 0.4 HF nozzle"
+    ],
     "complete_print_exhaust_fan_speed": [
         "50"
     ],
@@ -44,11 +47,10 @@
     "filament_unloading_speed_start": [
         "100"
     ],
-    "from": "system",
-    "instantiation": "true",
-    "compatible_printers": [
-      "Flashforge Guider4 0.4 HF nozzle"
+    "filament_vendor": [
+        "Flashforge"
     ],
+    "from": "system",
     "hot_plate_temp": [
         "100"
     ],
@@ -56,6 +58,8 @@
         "100"
     ],
     "inherits": "Flashforge Generic ABS @G3U",
+    "setting_id": "7xmWlHHNMvXBKdYS",
+    "instantiation": "true",
     "is_custom_defined": "0",
     "name": "Flashforge ASA Basic @FF G4 HF",
     "nozzle_temperature": [

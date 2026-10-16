@@ -18,7 +18,7 @@ void OAuthJob::parse_token_response(const std::string& body, bool error, OAuthRe
 {
     const auto j = nlohmann::json::parse(body, nullptr, false, true);
     if (j.is_discarded()) {
-        BOOST_LOG_TRIVIAL(warning) << "Invalid or no JSON data on token response: " << body;
+        BOOST_LOG_TRIVIAL(warning) << "Invalid or no JSON data on token response, bodyBytes=" << body.size();
         result.error_message = _u8L("Unknown error");
     } else if (error) {
         if (j.contains("error_description")) {
@@ -105,7 +105,7 @@ void OAuthJob::process(Ctl& ctl)
 
     // Handle timeout
     if (!received && ctl.was_canceled()) {
-        _data.result->error_message = _u8L("User cancelled.");
+        _data.result->error_message = _u8L("User canceled.");
     } else {
         // Wait a while to ensure the response has sent
         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
