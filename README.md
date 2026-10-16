@@ -10,10 +10,12 @@ Build nativo para **Apple Silicon (arm64)** do Flash Studio / Orca-Flashforge, c
 Requisitos: Mac com Apple Silicon (M1 ou mais novo) e macOS 11.3+.
 
 1. Baixe `Mac-Flash-Studio-<versão>-arm64.zip` na página de [Releases](../../releases), descompacte e arraste **Mac Flash Studio.app** para `/Applications`.
-2. O app é assinado só "ad hoc" (não notarizado). Na primeira abertura, clique com o botão direito → **Abrir**, ou rode:
-   ```bash
-   xattr -cr "/Applications/Mac Flash Studio.app"
-   ```
+2. O app é assinado só "ad hoc" (não notarizado pela Apple), então o macOS bloqueia a primeira abertura de um app baixado. Libere de uma destas formas:
+   - **Terminal (mais simples):** remove a quarentena do download e o app abre normalmente:
+     ```bash
+     xattr -cr "/Applications/Mac Flash Studio.app"
+     ```
+   - **Pelo sistema:** tente abrir o app, depois vá em **Ajustes do Sistema → Privacidade e Segurança**, role até a mensagem sobre "Mac Flash Studio" e clique em **Abrir Mesmo Assim**.
 3. **Plugin de rede:** o download já inclui o plugin da FlashForge (`libFlashNetwork_x64.dylib`, copiado sem modificação do Flash Studio oficial). Ele só existe para x86_64, então precisa do Rosetta: `softwareupdate --install-rosetta`. O plugin é software proprietário da FlashForge, redistribuído aqui apenas para conveniência; os direitos são da FlashForge.
    Se quiser trocar por outra versão do plugin (por exemplo a de um Flash Studio mais novo), use `./install-flashforge-plugin.sh` (também em `tools/mac/`), que copia o plugin do Flash Studio instalado em `/Applications` e reassina o app.
 
